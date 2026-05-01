@@ -620,10 +620,31 @@ const SPOTS = [
 // ---------------------------------------------------------------------------
 const map = L.map('map', { zoomControl: true }).setView(PIGNANS, 11);
 
-L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '&copy; OpenStreetMap France | &copy; OpenStreetMap'
-}).addTo(map);
+// Fonds de carte : sombre (par défaut, lisible avec overlays colorés),
+// clair, et OSM standard pour le détail topographique
+const baseLayers = {
+  "🌑 Sombre (recommandé)": L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap, &copy; CARTO',
+    maxZoom: 19,
+    subdomains: 'abcd'
+  }),
+  "☀️ Clair épuré": L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap, &copy; CARTO',
+    maxZoom: 19,
+    subdomains: 'abcd'
+  }),
+  "🗺️ OSM (détail)": L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap France',
+    maxZoom: 19
+  }),
+  "🛰️ Satellite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Tiles &copy; Esri',
+    maxZoom: 19
+  })
+};
+
+baseLayers["🌑 Sombre (recommandé)"].addTo(map);
+L.control.layers(baseLayers, null, { position: 'topright', collapsed: true }).addTo(map);
 
 // Marqueur Pignans (référence par défaut)
 L.marker(PIGNANS, {
@@ -750,19 +771,59 @@ function showToast(msg, ms = 4000) {
   return t;
 }
 
-function geolocate() {
+// Mode "pose ta position au doigt" : utile quand la géoloc navigateur échoue
+let manualMode = false;
+function setManualMode(on) {
+  manualMode = on;
+  const mapEl = document.getElementById('map');
+  mapEl.style.cursor = on ? 'crosshair' : '';
+  if (on) {
+    showToast("👆 Touchez la carte à l'endroit où vous vous trouvez.", 0);
+  }
+}
+window.setManualMode = setManualMode; // exposé pour les boutons inline du toast
+
+map.on('click', (e) => {
+  if (!manualMode) return;
+  setUserPosition([e.latlng.lat, e.latlng.lng], 30);
+  setManualMode(false);
+  showToast("✅ Position enregistrée. Liste des spots triée par distance.", 4000);
+});
+
+async function geolocate() {
   const fab = document.getElementById('fab-locate');
   if (!navigator.geolocation) {
-    showToast("⚠️ Géolocalisation non supportée par ce navigateur.");
+    showToast("⚠️ Géolocalisation non supportée. <button onclick='setManualMode(true)' style='margin-left:8px;padding:4px 8px;border:none;border-radius:4px;background:#4fc3f7;cursor:pointer'>Poser à la main</button>", 8000);
     return;
   }
   if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-    showToast("⚠️ La géolocalisation nécessite HTTPS. Utilise github.io ou un serveur local.");
+    showToast("⚠️ La géolocalisation nécessite HTTPS. Vérifiez l'URL (https://…)", 6000);
     return;
   }
+
+  // Diagnostic préalable : la permission a-t-elle déjà été refusée ?
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const perm = await navigator.permissions.query({ name: 'geolocation' });
+      console.log('Permission géoloc:', perm.state);
+      if (perm.state === 'denied') {
+        showToast(
+          "🔒 Géolocalisation bloquée pour ce site.<br>" +
+          "<b>Pour l'autoriser :</b><br>" +
+          "• <b>Chrome/Edge</b> : icône 🔒 à gauche de l'URL → Site settings → Location → Allow<br>" +
+          "• <b>Safari iOS</b> : Réglages → Safari → Géoloc des sites → Autoriser<br>" +
+          "• <b>Firefox</b> : icône 🛡️ à gauche de l'URL → Permissions<br>" +
+          "<button onclick='setManualMode(true)' style='margin-top:8px;padding:6px 10px;border:none;border-radius:4px;background:#4fc3f7;color:#0f1720;font-weight:600;cursor:pointer'>Ou poser ma position au doigt</button>",
+          0
+        );
+        return;
+      }
+    } catch(e) { /* Permissions API absente, on continue */ }
+  }
+
   fab.classList.add('loading');
   fab.textContent = '⏳';
-  showToast("📡 Recherche de votre position…", 0);
+  const loadingToast = showToast("📡 Recherche de votre position… (autorisez si demandé)", 0);
 
   navigator.geolocation.getCurrentPosition(
     (p) => {
@@ -776,23 +837,31 @@ function geolocate() {
     (err) => {
       fab.classList.remove('loading');
       fab.textContent = '📍';
+      console.warn('Géoloc error code', err.code, err.message);
       const reasons = {
-        1: "❌ Permission refusée. Autorisez la géolocalisation dans les réglages du navigateur, puis rechargez la page.",
-        2: "❌ Position indisponible (pas de GPS / réseau).",
-        3: "❌ Délai dépassé. Réessayez en extérieur."
+        1: "🔒 Permission refusée par le navigateur.",
+        2: "📡 Position indisponible (pas de GPS / réseau).",
+        3: "⏱️ Délai dépassé."
       };
-      showToast(reasons[err.code] || `❌ Erreur géoloc : ${err.message}`, 6000);
-      console.warn('Géoloc error:', err);
+      showToast(
+        (reasons[err.code] || `❌ Erreur : ${err.message}`) +
+        "<br><button onclick='setManualMode(true)' style='margin-top:8px;padding:6px 10px;border:none;border-radius:4px;background:#4fc3f7;color:#0f1720;font-weight:600;cursor:pointer'>👆 Poser ma position au doigt</button>",
+        0
+      );
     },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
   );
 }
 
-// Brancher les deux boutons (sidebar + FAB flottant)
 document.getElementById('locate-btn').addEventListener('click', geolocate);
 document.getElementById('fab-locate').addEventListener('click', geolocate);
-// Note: pas d'auto-géoloc au chargement — certains navigateurs (Safari iOS)
-// bloquent silencieusement les appels qui ne sont pas déclenchés par un geste utilisateur.
+// Long-press sur le bouton 📍 → mode manuel direct
+let pressTimer;
+const fabLocate = document.getElementById('fab-locate');
+['mousedown','touchstart'].forEach(ev => fabLocate.addEventListener(ev, () => {
+  pressTimer = setTimeout(() => setManualMode(true), 700);
+}));
+['mouseup','mouseleave','touchend','touchcancel'].forEach(ev => fabLocate.addEventListener(ev, () => clearTimeout(pressTimer)));
 
 // ---------------------------------------------------------------------------
 // Liste des spots (sidebar)
@@ -944,7 +1013,7 @@ async function fetchElevations(points) {
 // Score d'habitat truite à partir des caractéristiques d'un cours d'eau
 function scoreHabitat({ elevations, length, tags }) {
   const valid = elevations.filter(e => e != null);
-  if (valid.length < 2) return { score: 0, label: 'Inconnu', color: '#888' };
+  if (valid.length < 2) return { score: 0, label: 'Inconnu', color: '#888', show: false };
 
   const minE = Math.min(...valid);
   const maxE = Math.max(...valid);
@@ -953,35 +1022,29 @@ function scoreHabitat({ elevations, length, tags }) {
 
   let score = 0;
 
-  // Altitude : eau plus fraîche en altitude (Provence ~ <16°C été au-dessus de 400m)
   if (meanE >= 400) score += 3;
   else if (meanE >= 250) score += 2;
   else if (meanE >= 120) score += 1;
 
-  // Pente : courant rapide = oxygénation
   if (slope >= 2) score += 2;
   else if (slope >= 0.8) score += 1;
 
-  // Type OSM : un "stream" est plus probablement à truite qu'une "river" lente
   if (tags.waterway === 'stream') score += 1;
-  if (tags.waterway === 'river') score += 0;
 
-  // Pénalités
   if (tags.intermittent === 'yes' || tags.seasonal === 'yes') score -= 3;
   if (tags.waterway === 'canal' || tags.waterway === 'ditch' || tags.waterway === 'drain') score -= 5;
 
-  // Bonus si le nom suggère un vrai cours d'eau salmonicole
   const name = (tags.name || '').toLowerCase();
   if (/source|aille|gapeau|caramy|issole|verdon|argens|réal|bresque|riautord/.test(name)) score += 1;
 
-  let label, color;
-  if (score >= 5) { label = 'Très fort'; color = '#1b5e20'; }
-  else if (score >= 3) { label = 'Fort'; color = '#4caf50'; }
-  else if (score >= 1) { label = 'Modéré'; color = '#ff9800'; }
-  else if (score >= -1) { label = 'Faible'; color = '#90a4ae'; }
-  else { label = 'Improbable'; color = '#455a64'; }
+  // 3 niveaux seulement, couleurs vives, on masque le bruit (faible/improbable)
+  let label, color, show = true;
+  if (score >= 5)      { label = 'Très fort'; color = '#00e676'; }   // vert vif
+  else if (score >= 3) { label = 'Fort';      color = '#76ff03'; }   // vert lime
+  else if (score >= 1) { label = 'Modéré';    color = '#ffb300'; }   // ambre
+  else                 { label = 'Faible';    color = '#607d8b'; show = false; }
 
-  return { score, label, color, meanE, slope };
+  return { score, label, color, meanE, slope, show };
 }
 
 // Distance haversine en km entre deux points
@@ -1056,30 +1119,34 @@ async function loadHabitatLayer() {
     const elevs = await fetchElevations(allSamples);
 
     habitatLayer.clearLayers();
-    const stats = { 'Très fort': 0, 'Fort': 0, 'Modéré': 0, 'Faible': 0, 'Improbable': 0, 'Inconnu': 0 };
+    const stats = { 'Très fort': 0, 'Fort': 0, 'Modéré': 0, 'Faible': 0, 'Inconnu': 0 };
+    let shown = 0;
 
     wayMeta.forEach(w => {
       const wayElevs = elevs.slice(w.offset, w.offset + w.samples.length);
       const sc = scoreHabitat({ elevations: wayElevs, length: w.length, tags: w.tags });
       stats[sc.label] = (stats[sc.label] || 0) + 1;
+      if (!sc.show) return; // on masque les cours d'eau peu prometteurs pour la lisibilité
+      shown++;
 
-      const line = L.polyline(w.coords, {
-        color: sc.color,
-        weight: 4,
-        opacity: 0.85
-      });
-      const name = w.tags.name || w.tags.waterway || 'cours d\'eau';
-      line.bindPopup(`
+      // Contour blanc (casing) + ligne colorée par-dessus pour un contraste maximal
+      const casing = L.polyline(w.coords, { color: '#ffffff', weight: 7, opacity: 0.85, lineCap: 'round' });
+      const line   = L.polyline(w.coords, { color: sc.color, weight: 4, opacity: 1, lineCap: 'round' });
+
+      const name = w.tags.name || 'Cours d\'eau sans nom';
+      const popupHtml = `
         <h3>${name}</h3>
-        <div style="margin:6px 0"><span class="badge" style="background:${sc.color};color:white">Potentiel ${sc.label}</span></div>
+        <div style="margin:6px 0"><span class="badge" style="background:${sc.color};color:#0f1720;font-weight:700">Potentiel ${sc.label}</span></div>
         <div class="info-row"><span class="label">Type</span><span>${w.tags.waterway}</span></div>
         <div class="info-row"><span class="label">Altitude moy.</span><span>${sc.meanE != null ? Math.round(sc.meanE)+' m' : '—'}</span></div>
         <div class="info-row"><span class="label">Pente</span><span>${sc.slope != null ? sc.slope.toFixed(2)+' %' : '—'}</span></div>
         <div class="info-row"><span class="label">Longueur visible</span><span>${w.length.toFixed(2)} km</span></div>
-        <div class="info-row"><span class="label">Score</span><span>${sc.score}</span></div>
-        ${w.tags.intermittent === 'yes' ? '<div style="color:#ff9800;font-size:11px;margin-top:6px">⚠️ Cours d\'eau intermittent (peut s\'assécher)</div>' : ''}
-        <div style="margin-top:8px;font-size:11px;color:var(--muted)">Estimation algorithmique. Vérifier sur place et auprès de l'AAPPMA.</div>
-      `, { maxWidth: 300 });
+        ${w.tags.intermittent === 'yes' ? '<div style="color:#ff9800;font-size:11px;margin-top:6px">⚠️ Cours d\'eau intermittent (peut s\'assécher en été)</div>' : ''}
+        <div style="margin-top:8px;font-size:11px;color:var(--muted)">Estimation algorithmique. Vérifiez auprès de votre AAPPMA.</div>
+      `;
+      casing.bindPopup(popupHtml, { maxWidth: 300 });
+      line.bindPopup(popupHtml, { maxWidth: 300 });
+      casing.addTo(habitatLayer);
       line.addTo(habitatLayer);
     });
 
@@ -1088,8 +1155,8 @@ async function loadHabitatLayer() {
     fab.classList.add('active');
     fab.textContent = '✅ Potentiel truite';
     toast.remove();
-    const summary = `Très fort: ${stats['Très fort']} · Fort: ${stats['Fort']} · Modéré: ${stats['Modéré']}`;
-    showToast(`✅ ${ways.length} cours d'eau analysés. ${summary}`, 5000);
+    const summary = `🟢 ${stats['Très fort']} très fort · 🟢 ${stats['Fort']} fort · 🟠 ${stats['Modéré']} modéré`;
+    showToast(`${shown}/${ways.length} cours d'eau prometteurs affichés.<br>${summary}`, 6000);
   } catch (e) {
     console.error(e);
     showToast("❌ Erreur lors de l'analyse : " + e.message, 5000);
@@ -1111,17 +1178,16 @@ function toggleHabitat() {
 
 document.getElementById('fab-habitat').addEventListener('click', toggleHabitat);
 
-// Mise à jour de la légende pour inclure la couche habitat
+// Légende dédiée à la couche habitat (3 niveaux affichés, "faible" est masqué)
 const habitatLegend = L.control({ position: 'bottomleft' });
 habitatLegend.onAdd = function() {
   const div = L.DomUtil.create('div', 'legend');
   div.innerHTML = `
-    <h4>Potentiel habitat truite</h4>
-    <div class="item"><span class="swatch" style="background:#1b5e20;border-radius:2px;height:4px;width:20px"></span>Très fort</div>
-    <div class="item"><span class="swatch" style="background:#4caf50;border-radius:2px;height:4px;width:20px"></span>Fort</div>
-    <div class="item"><span class="swatch" style="background:#ff9800;border-radius:2px;height:4px;width:20px"></span>Modéré</div>
-    <div class="item"><span class="swatch" style="background:#90a4ae;border-radius:2px;height:4px;width:20px"></span>Faible</div>
-    <div style="margin-top:6px;font-size:10px;color:var(--muted);max-width:200px">Basé sur altitude, pente et type OSM. Indicatif uniquement.</div>
+    <h4>Potentiel truite</h4>
+    <div class="item"><span style="display:inline-block;background:#00e676;border:2px solid white;height:5px;width:24px"></span>&nbsp;Très fort</div>
+    <div class="item"><span style="display:inline-block;background:#76ff03;border:2px solid white;height:5px;width:24px"></span>&nbsp;Fort</div>
+    <div class="item"><span style="display:inline-block;background:#ffb300;border:2px solid white;height:5px;width:24px"></span>&nbsp;Modéré</div>
+    <div style="margin-top:6px;font-size:10px;color:var(--muted);max-width:200px">Cours d'eau peu prometteurs masqués pour la lisibilité.</div>
   `;
   return div;
 };
