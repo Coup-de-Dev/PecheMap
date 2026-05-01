@@ -1432,6 +1432,25 @@ function nearestPointDist(point, list) {
   return min;
 }
 
+// Vrai si le point est à <maxMeters d'au moins un point d'une des sections du
+// cours d'eau chargé. Utilisé pour exclure les markers (cascade/pont/source)
+// qui appartiennent à d'autres rivières mais sont dans le bbox.
+function isNearRiver(lat, lon, segments, maxMeters = 80) {
+  for (const seg of segments) {
+    for (const p of seg.geometry) {
+      if (distanceMeters([lat, lon], [p.lat, p.lon]) <= maxMeters) return true;
+    }
+  }
+  return false;
+}
+
+// Lien Google Maps cliquable (recherche ouvre l'app native sur mobile)
+function gmapsLink(lat, lon, label = '🧭 Voir sur Google Maps') {
+  const url = `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+  return `<a href="${url}" target="_blank" rel="noopener"
+    style="display:inline-block;margin-top:8px;padding:6px 10px;background:#4fc3f7;color:#0f1720;text-decoration:none;font-size:11px;font-weight:700;border-radius:4px">${label} →</a>`;
+}
+
 // État courant de la vue rivière (pour pouvoir basculer entre modes sans refetch)
 let currentRiverData = null;
 let currentRiverMode = 'access';
@@ -1500,18 +1519,22 @@ async function showFullRiver(name, lat, lon) {
       }
     });
 
-    const springs = elems.filter(e => e.tags?.natural === 'spring').map(e => {
+    const springsRaw = elems.filter(e => e.tags?.natural === 'spring').map(e => {
       if (e.type === 'node') return { lat: e.lat, lon: e.lon, name: e.tags?.name };
       const p = e.geometry?.[0];
       return p ? { lat: p.lat, lon: p.lon, name: e.tags?.name } : null;
     }).filter(Boolean);
+    // On ne garde QUE les sources à proximité immédiate du tracé de notre rivière
+    const springs = springsRaw.filter(s => isNearRiver(s.lat, s.lon, segments, 120));
 
-    const bridges = elems
+    const bridgesRaw = elems
       .filter(e => (e.tags?.bridge === 'yes' || e.tags?.man_made === 'bridge') && e.geometry)
       .map(e => {
         const mid = e.geometry[Math.floor(e.geometry.length / 2)];
         return { lat: mid.lat, lon: mid.lon, name: e.tags?.name };
       });
+    // On ne garde QUE les ponts qui enjambent notre rivière (≤ 50 m du tracé)
+    const bridges = bridgesRaw.filter(b => isNearRiver(b.lat, b.lon, segments, 50));
 
     const allWaterways = elems.filter(e => e.tags?.waterway && e.geometry);
     const lakes = elems.filter(e => e.tags?.natural === 'water' && e.geometry);
@@ -1540,6 +1563,7 @@ async function showFullRiver(name, lat, lon) {
     // ---- Cascades / rapides tagués dans OSM ----
     // On sépare les VRAIES cascades (chute verticale, fosse aval = spot ⭐)
     // des RAPIDES (radier rocheux étendu, hameçon coincé = chiant à pêcher)
+    // ET on filtre par proximité au tracé : pas de cascade d'une autre rivière !
     const cascadesOSM = [];
     const rapidsOSM = [];
     elems.forEach(e => {
@@ -1552,6 +1576,8 @@ async function showFullRiver(name, lat, lon) {
         const mid = e.geometry[Math.floor(e.geometry.length / 2)];
         lat = mid.lat; lon = mid.lon;
       } else return;
+      // Filtre proximité : doit être SUR notre rivière
+      if (!isNearRiver(lat, lon, segments, 80)) return;
       if (isFall) {
         const type = e.tags.waterway === 'waterfall' ? 'Cascade'
                    : e.tags.man_made === 'weir' ? 'Seuil / barrage bas'
@@ -1732,25 +1758,25 @@ function renderRiverView() {
 
   confluences.forEach(c => {
     L.marker([c.lat, c.lon], { icon: dotIcon('🌀', '#1976d2') })
-      .bindPopup(`<b>🌀 Confluence</b><br>Avec : ${c.otherName}<br><span style="font-size:11px;color:var(--muted)">Lieu de chasse privilégié — eau plus fraîche du tributaire + accumulation de la dérive</span>`)
+      .bindPopup(`<b>🌀 Confluence</b><br>Avec : ${c.otherName}<br><span style="font-size:11px;color:var(--muted)">Lieu de chasse privilégié — eau plus fraîche du tributaire + accumulation de la dérive</span><br>${gmapsLink(c.lat, c.lon)}`)
       .addTo(riverLayer);
   });
 
   springs.forEach(s => {
     L.marker([s.lat, s.lon], { icon: dotIcon('💧', '#00bcd4') })
-      .bindPopup(`<b>💧 Source</b>${s.name ? '<br>' + s.name : ''}<br><span style="font-size:11px;color:var(--muted)">Refuge thermique critique en été (eau ~12-14°C constante en pays karstique)</span>`)
+      .bindPopup(`<b>💧 Source</b>${s.name ? '<br>' + s.name : ''}<br><span style="font-size:11px;color:var(--muted)">Refuge thermique critique en été (eau ~12-14°C constante en pays karstique)</span><br>${gmapsLink(s.lat, s.lon)}`)
       .addTo(riverLayer);
   });
 
   bridges.forEach(b => {
     L.marker([b.lat, b.lon], { icon: dotIcon('🌉', '#7b1fa2') })
-      .bindPopup(`<b>🌉 Pont</b>${b.name ? '<br>' + b.name : ''}<br><span style="font-size:11px;color:var(--muted)">Fosse de pile, couvert, accès facile</span>`)
+      .bindPopup(`<b>🌉 Pont</b>${b.name ? '<br>' + b.name : ''}<br><span style="font-size:11px;color:var(--muted)">Fosse de pile, couvert, accès facile</span><br>${gmapsLink(b.lat, b.lon)}`)
       .addTo(riverLayer);
   });
 
   lakeOutletPoints.forEach(o => {
     L.marker([o.lat, o.lon], { icon: dotIcon('🏞️', '#388e3c') })
-      .bindPopup(`<b>🏞️ Sortie de plan d'eau</b>${o.lakeName ? '<br>' + o.lakeName : ''}<br><span style="font-size:11px;color:var(--muted)">Eau oxygénée, brassée, riche en proies</span>`)
+      .bindPopup(`<b>🏞️ Sortie de plan d'eau</b>${o.lakeName ? '<br>' + o.lakeName : ''}<br><span style="font-size:11px;color:var(--muted)">Eau oxygénée, brassée, riche en proies</span><br>${gmapsLink(o.lat, o.lon)}`)
       .addTo(riverLayer);
   });
 
@@ -1770,6 +1796,7 @@ function renderRiverView() {
           Pose en limite de courant calme / écume.
         </span>
         ${isOSM ? '' : '<div style="font-size:10px;color:var(--muted);margin-top:4px">⚙️ Détecté par profil d&rsquo;altitude — à confirmer sur place.</div>'}
+        ${gmapsLink(c.lat, c.lon)}
       `)
       .addTo(riverLayer);
   });
@@ -1789,6 +1816,7 @@ function renderRiverView() {
           Pêche technique, hameçon facilement coincé dans les rochers.<br>
           Préférer les pocket waters (fly nymphe) ou contourner.
         </span>
+        ${gmapsLink(r.lat, r.lon)}
       `)
       .addTo(riverLayer);
   });
