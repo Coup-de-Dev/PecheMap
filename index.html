@@ -186,19 +186,59 @@
     100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
   }
   .fish-marker {
-    width: 28px;
-    height: 28px;
-    border-radius: 50% 50% 50% 0;
-    transform: rotate(-45deg);
-    border: 2px solid white;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 3px solid white;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    cursor: pointer;
   }
   .fish-marker span {
-    transform: rotate(45deg);
-    font-size: 14px;
+    font-size: 16px;
+    line-height: 1;
+  }
+  .pignans-label {
+    background: #ffeb3b;
+    color: #0f1720;
+    padding: 4px 10px;
+    border-radius: 16px;
+    font-size: 12px;
+    font-weight: 700;
+    border: 2px solid #fbc02d;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    white-space: nowrap;
+  }
+  /* Bouton flottant de géolocalisation (visible directement sur la carte) */
+  .fab-locate {
+    position: absolute;
+    right: 14px;
+    bottom: 90px;
+    z-index: 1000;
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #0f1720;
+    border: none;
+    font-size: 22px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.15s;
+  }
+  .fab-locate:hover { transform: scale(1.05); }
+  .fab-locate:active { transform: scale(0.95); }
+  .fab-locate.loading {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    from { transform: rotate(0); }
+    to { transform: rotate(360deg); }
   }
   .legend {
     background: var(--panel);
@@ -285,6 +325,7 @@
 
   <button id="toggle-sidebar">☰ Spots</button>
   <div id="map"></div>
+  <button class="fab-locate" id="fab-locate" title="Me géolocaliser">📍</button>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -301,6 +342,43 @@ const PIGNANS = [43.302, 6.226];
 // Les coordonnées pointent vers des accès fréquemment utilisés.
 // ---------------------------------------------------------------------------
 const SPOTS = [
+  // --- Spots à proximité immédiate de Pignans (AAPPMA La Gaule Pierrefeucaine) ---
+  {
+    name: "Pignans — Vallon du Riautord",
+    river: "Le Riautord (affluent du Réal Martin)",
+    coords: [43.310, 6.215],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Toc fin, mouche en arc",
+    parking: "Sortie nord du village, chemin du vallon",
+    aappma: "La Gaule Pierrefeucaine",
+    notes: "Petit cours d'eau qui traverse Pignans. Fario sauvages dans les fosses ombragées. Vérifier l'AAPPMA pour les zones autorisées."
+  },
+  {
+    name: "Carnoules — Le Réal Martin",
+    river: "Le Réal Martin",
+    coords: [43.293, 6.187],
+    difficulty: "easy",
+    species: ["Truite fario", "Vairon"],
+    category: "1ère catégorie",
+    technique: "Toc, leurre souple, mouche",
+    parking: "Pont de la D13, parking",
+    aappma: "La Gaule Pierrefeucaine",
+    notes: "Spot le plus proche de Pignans (~5 km). Lâchers en début de saison, accès facile."
+  },
+  {
+    name: "Gonfaron — Le Réal",
+    river: "Le Réal (affluent de l'Aille)",
+    coords: [43.323, 6.290],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Toc, mouche",
+    parking: "Bord D39, plusieurs accès",
+    aappma: "La Gaule Pierrefeucaine",
+    notes: "Petit cours d'eau du massif des Maures, ambiance sauvage à 7 km à l'est de Pignans."
+  },
   {
     name: "Réal Martin — Pont de la Portanière",
     river: "Le Réal Martin",
@@ -509,11 +587,12 @@ L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
 L.marker(PIGNANS, {
   icon: L.divIcon({
     className: '',
-    html: '<div style="background:#fff;color:#0f1720;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;border:1px solid #2a3a4d;white-space:nowrap">📍 Pignans</div>',
-    iconSize: [70, 20],
-    iconAnchor: [35, 10]
-  })
-}).addTo(map);
+    html: '<div class="pignans-label">🏠 Pignans</div>',
+    iconSize: [90, 26],
+    iconAnchor: [45, 13]
+  }),
+  zIndexOffset: 500
+}).addTo(map).bindPopup('<b>Pignans</b><br>Point de référence');
 
 // Légende
 const legend = L.control({ position: 'bottomright' });
@@ -558,10 +637,16 @@ function distanceKm(a, b) {
 const markers = {};
 SPOTS.forEach((spot, i) => {
   const marker = L.marker(spot.coords, { icon: makeSpotIcon(spot.difficulty) }).addTo(map);
-  marker.bindPopup(buildPopup(spot));
+  marker.bindPopup(buildPopup(spot), { maxWidth: 320, minWidth: 240 });
   marker.on('click', () => highlightCard(i));
   markers[i] = marker;
 });
+
+function refreshAllPopups() {
+  SPOTS.forEach((spot, i) => {
+    if (markers[i]) markers[i].setPopupContent(buildPopup(spot));
+  });
+}
 
 function buildPopup(spot) {
   const dist = userPos ? distanceKm(userPos, spot.coords).toFixed(1) + ' km' : '—';
@@ -600,41 +685,53 @@ function setUserPosition(pos, accuracy) {
     userCircle.setLatLng(pos).setRadius(accuracy || 50);
   } else {
     userMarker = L.marker(pos, {
-      icon: L.divIcon({ className: '', html: '<div class="user-marker"></div>', iconSize: [18, 18], iconAnchor: [9,9] })
-    }).addTo(map).bindPopup('Vous êtes ici');
+      icon: L.divIcon({ className: '', html: '<div class="user-marker"></div>', iconSize: [18, 18], iconAnchor: [9,9] }),
+      zIndexOffset: 1000
+    }).addTo(map).bindPopup('📍 Vous êtes ici');
     userCircle = L.circle(pos, {
       radius: accuracy || 50,
       color: '#4fc3f7', fillColor: '#4fc3f7', fillOpacity: 0.1, weight: 1
     }).addTo(map);
   }
+  refreshAllPopups();
   renderList();
 }
 
-document.getElementById('locate-btn').addEventListener('click', () => {
+function geolocate(centerView = true) {
+  const fab = document.getElementById('fab-locate');
   if (!navigator.geolocation) {
-    alert("Géolocalisation non supportée. Position par défaut : Pignans.");
-    setUserPosition(PIGNANS, 100);
-    map.setView(PIGNANS, 12);
+    alert("Géolocalisation non supportée par ce navigateur.");
     return;
   }
+  fab.classList.add('loading');
+  fab.textContent = '⏳';
   navigator.geolocation.getCurrentPosition(
     (p) => {
+      fab.classList.remove('loading');
+      fab.textContent = '📍';
       const pos = [p.coords.latitude, p.coords.longitude];
       setUserPosition(pos, p.coords.accuracy);
-      map.setView(pos, 12);
+      if (centerView) map.setView(pos, 12);
     },
     (err) => {
-      console.warn(err);
-      alert("Impossible d'obtenir votre position. Utilisation de Pignans par défaut.");
-      setUserPosition(PIGNANS, 100);
-      map.setView(PIGNANS, 12);
+      fab.classList.remove('loading');
+      fab.textContent = '📍';
+      console.warn('Géoloc:', err.message);
+      if (centerView) {
+        alert("Géolocalisation refusée ou indisponible. Affichage centré sur Pignans.");
+        map.setView(PIGNANS, 12);
+      }
     },
     { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
   );
-});
+}
 
-// Position initiale par défaut : Pignans (au cas où l'utilisateur refuse la géoloc)
-setUserPosition(PIGNANS, 100);
+// Brancher les deux boutons (sidebar + FAB flottant)
+document.getElementById('locate-btn').addEventListener('click', () => geolocate(true));
+document.getElementById('fab-locate').addEventListener('click', () => geolocate(true));
+
+// Tentative de géoloc automatique au chargement (silencieuse en cas de refus)
+geolocate(false);
 
 // ---------------------------------------------------------------------------
 // Liste des spots (sidebar)
