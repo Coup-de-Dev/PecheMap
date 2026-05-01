@@ -1015,21 +1015,34 @@ async function fetchElevations(points) {
   return out;
 }
 
+// Rivières du Var connues comme salmonicoles (1ère catégorie ou ayant des
+// populations de truite documentées). Si le nom matche, on garantit un
+// score minimum "Fort" même si l'altitude/la pente ne sont pas idéales
+// (cas typique du Réal Martin et de l'Issole en plaine méditerranéenne).
+const KNOWN_TROUT_RIVERS = /\b(aille|gapeau|caramy|issole|verdon|argens|r[ée]al|bresque|riautord|collobrier|cogolin|valescure|favi[èe]re|m[ôo]le|pansard|nartuby|jabron|loup|brague|siagne|verne|maravenne|borrels|loubes|naye)\b/i;
+
 // Score d'habitat truite à partir des caractéristiques d'un cours d'eau
 function scoreHabitat({ elevations, length, tags }) {
   const valid = elevations.filter(e => e != null);
-  if (valid.length < 2) return { score: 0, label: 'Inconnu', color: '#888', show: false };
+  const name = (tags.name || '').toLowerCase();
+  const isKnown = KNOWN_TROUT_RIVERS.test(name);
 
-  const minE = Math.min(...valid);
-  const maxE = Math.max(...valid);
-  const meanE = valid.reduce((a,b)=>a+b,0) / valid.length;
-  const slope = length > 0 ? (maxE - minE) / length * 100 : 0; // %
+  if (valid.length < 2 && !isKnown) {
+    return { score: 0, label: 'Inconnu', color: '#888', show: false, isKnown };
+  }
+
+  const minE = valid.length ? Math.min(...valid) : 0;
+  const maxE = valid.length ? Math.max(...valid) : 0;
+  const meanE = valid.length ? valid.reduce((a,b)=>a+b,0) / valid.length : null;
+  const slope = (length > 0 && valid.length >= 2) ? (maxE - minE) / length * 100 : 0;
 
   let score = 0;
 
-  if (meanE >= 400) score += 3;
-  else if (meanE >= 250) score += 2;
-  else if (meanE >= 120) score += 1;
+  if (meanE != null) {
+    if (meanE >= 400) score += 3;
+    else if (meanE >= 250) score += 2;
+    else if (meanE >= 120) score += 1;
+  }
 
   if (slope >= 2) score += 2;
   else if (slope >= 0.8) score += 1;
@@ -1039,17 +1052,16 @@ function scoreHabitat({ elevations, length, tags }) {
   if (tags.intermittent === 'yes' || tags.seasonal === 'yes') score -= 3;
   if (tags.waterway === 'canal' || tags.waterway === 'ditch' || tags.waterway === 'drain') score -= 5;
 
-  const name = (tags.name || '').toLowerCase();
-  if (/source|aille|gapeau|caramy|issole|verdon|argens|réal|bresque|riautord/.test(name)) score += 1;
+  // Les rivières à truite connues sont validées comme "Fort" minimum
+  if (isKnown) score = Math.max(score + 2, 3);
 
-  // 3 niveaux seulement, couleurs vives, on masque le bruit (faible/improbable)
   let label, color, show = true;
-  if (score >= 5)      { label = 'Très fort'; color = '#00e676'; }   // vert vif
-  else if (score >= 3) { label = 'Fort';      color = '#76ff03'; }   // vert lime
-  else if (score >= 1) { label = 'Modéré';    color = '#ffb300'; }   // ambre
+  if (score >= 5)      { label = 'Très fort'; color = '#00e676'; }
+  else if (score >= 3) { label = 'Fort';      color = '#76ff03'; }
+  else if (score >= 1) { label = 'Modéré';    color = '#ffb300'; }
   else                 { label = 'Faible';    color = '#607d8b'; show = false; }
 
-  return { score, label, color, meanE, slope, show };
+  return { score, label, color, meanE, slope, show, isKnown };
 }
 
 // Distance haversine en km entre deux points
@@ -1125,34 +1137,43 @@ async function loadHabitatLayer() {
 
     habitatLayer.clearLayers();
     const stats = { 'Très fort': 0, 'Fort': 0, 'Modéré': 0, 'Faible': 0, 'Inconnu': 0 };
-    let shown = 0;
+    let highlighted = 0;
 
     wayMeta.forEach(w => {
       const wayElevs = elevs.slice(w.offset, w.offset + w.samples.length);
       const sc = scoreHabitat({ elevations: wayElevs, length: w.length, tags: w.tags });
       stats[sc.label] = (stats[sc.label] || 0) + 1;
-      if (!sc.show) return; // on masque les cours d'eau peu prometteurs pour la lisibilité
-      shown++;
-
-      // Contour blanc (casing) + ligne colorée par-dessus pour un contraste maximal
-      const casing = L.polyline(w.coords, { color: '#ffffff', weight: 7, opacity: 0.85, lineCap: 'round' });
-      const line   = L.polyline(w.coords, { color: sc.color, weight: 4, opacity: 1, lineCap: 'round' });
-
       const name = w.tags.name || 'Cours d\'eau sans nom';
+
       const popupHtml = `
         <h3>${name}</h3>
-        <div style="margin:6px 0"><span class="badge" style="background:${sc.color};color:#0f1720;font-weight:700">Potentiel ${sc.label}</span></div>
+        <div style="margin:6px 0"><span class="badge" style="background:${sc.color};color:#0f1720;font-weight:700">Potentiel ${sc.label}${sc.isKnown ? ' ⭐' : ''}</span></div>
         <div class="info-row"><span class="label">Type</span><span>${w.tags.waterway}</span></div>
         <div class="info-row"><span class="label">Altitude moy.</span><span>${sc.meanE != null ? Math.round(sc.meanE)+' m' : '—'}</span></div>
         <div class="info-row"><span class="label">Pente</span><span>${sc.slope != null ? sc.slope.toFixed(2)+' %' : '—'}</span></div>
         <div class="info-row"><span class="label">Longueur visible</span><span>${w.length.toFixed(2)} km</span></div>
+        ${sc.isKnown ? '<div style="color:#4fc3f7;font-size:11px;margin-top:6px">⭐ Rivière référencée comme salmonicole dans le Var</div>' : ''}
         ${w.tags.intermittent === 'yes' ? '<div style="color:#ff9800;font-size:11px;margin-top:6px">⚠️ Cours d\'eau intermittent (peut s\'assécher en été)</div>' : ''}
         <div style="margin-top:8px;font-size:11px;color:var(--muted)">Estimation algorithmique. Vérifiez auprès de votre AAPPMA.</div>
       `;
-      casing.bindPopup(popupHtml, { maxWidth: 300 });
-      line.bindPopup(popupHtml, { maxWidth: 300 });
-      casing.addTo(habitatLayer);
-      line.addTo(habitatLayer);
+
+      // 1) Couche de base : TOUS les cours d'eau, ligne bleue discrète mais visible
+      const baseLine = L.polyline(w.coords, {
+        color: '#4fc3f7', weight: 2.5, opacity: 0.75, lineCap: 'round'
+      });
+      baseLine.bindPopup(popupHtml, { maxWidth: 300 });
+      baseLine.addTo(habitatLayer);
+
+      // 2) Surcouche : uniquement les bons spots — contour blanc + couleur vive
+      if (sc.show) {
+        highlighted++;
+        const casing = L.polyline(w.coords, { color: '#ffffff', weight: 7, opacity: 0.9, lineCap: 'round' });
+        const line   = L.polyline(w.coords, { color: sc.color, weight: 4, opacity: 1, lineCap: 'round' });
+        casing.bindPopup(popupHtml, { maxWidth: 300 });
+        line.bindPopup(popupHtml, { maxWidth: 300 });
+        casing.addTo(habitatLayer);
+        line.addTo(habitatLayer);
+      }
     });
 
     habitatLayer.addTo(map);
@@ -1160,8 +1181,8 @@ async function loadHabitatLayer() {
     fab.classList.add('active');
     fab.textContent = '✅ Potentiel truite';
     toast.remove();
-    const summary = `🟢 ${stats['Très fort']} très fort · 🟢 ${stats['Fort']} fort · 🟠 ${stats['Modéré']} modéré`;
-    showToast(`${shown}/${ways.length} cours d'eau prometteurs affichés.<br>${summary}`, 6000);
+    const summary = `🟢 ${stats['Très fort']} très fort · 🟢 ${stats['Fort']} fort · 🟠 ${stats['Modéré']} modéré · 🔵 ${ways.length - highlighted} autres`;
+    showToast(`${ways.length} cours d'eau affichés (${highlighted} prometteurs surlignés).<br>${summary}`, 7000);
   } catch (e) {
     console.error(e);
     showToast("❌ Erreur lors de l'analyse : " + e.message, 5000);
@@ -1190,9 +1211,10 @@ habitatLegend.onAdd = function() {
   div.innerHTML = `
     <h4>Potentiel truite</h4>
     <div class="item"><span style="display:inline-block;background:#00e676;border:2px solid white;height:5px;width:24px"></span>&nbsp;Très fort</div>
-    <div class="item"><span style="display:inline-block;background:#76ff03;border:2px solid white;height:5px;width:24px"></span>&nbsp;Fort</div>
+    <div class="item"><span style="display:inline-block;background:#76ff03;border:2px solid white;height:5px;width:24px"></span>&nbsp;Fort ⭐ rivière connue</div>
     <div class="item"><span style="display:inline-block;background:#ffb300;border:2px solid white;height:5px;width:24px"></span>&nbsp;Modéré</div>
-    <div style="margin-top:6px;font-size:10px;color:var(--muted);max-width:200px">Cours d'eau peu prometteurs masqués pour la lisibilité.</div>
+    <div class="item"><span style="display:inline-block;background:#4fc3f7;height:3px;width:24px"></span>&nbsp;Cours d'eau (info au clic)</div>
+    <div style="margin-top:6px;font-size:10px;color:var(--muted);max-width:200px">Tous les cours d'eau sont cliquables pour leur fiche.</div>
   `;
   return div;
 };
