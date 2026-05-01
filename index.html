@@ -240,6 +240,47 @@
     from { transform: rotate(0); }
     to { transform: rotate(360deg); }
   }
+  /* Bouton "Potentiel truite" */
+  .fab-habitat {
+    position: absolute;
+    right: 14px;
+    bottom: 156px;
+    z-index: 1000;
+    height: 44px;
+    padding: 0 14px;
+    border-radius: 22px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .fab-habitat.active {
+    background: #2e7d32;
+    border-color: #4caf50;
+  }
+  .fab-habitat:disabled { opacity: 0.6; cursor: wait; }
+  .toast {
+    position: absolute;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel);
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    z-index: 2000;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    max-width: 90%;
+    text-align: center;
+  }
   .legend {
     background: var(--panel);
     color: var(--text);
@@ -325,6 +366,7 @@
 
   <button id="toggle-sidebar">☰ Spots</button>
   <div id="map"></div>
+  <button class="fab-habitat" id="fab-habitat" title="Afficher les cours d'eau colorés par potentiel truite">🗺️ Potentiel truite</button>
   <button class="fab-locate" id="fab-locate" title="Me géolocaliser">📍</button>
 </div>
 
@@ -697,41 +739,60 @@ function setUserPosition(pos, accuracy) {
   renderList();
 }
 
-function geolocate(centerView = true) {
+function showToast(msg, ms = 4000) {
+  const old = document.querySelector('.toast');
+  if (old) old.remove();
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.innerHTML = msg;
+  document.body.appendChild(t);
+  if (ms) setTimeout(() => t.remove(), ms);
+  return t;
+}
+
+function geolocate() {
   const fab = document.getElementById('fab-locate');
   if (!navigator.geolocation) {
-    alert("Géolocalisation non supportée par ce navigateur.");
+    showToast("⚠️ Géolocalisation non supportée par ce navigateur.");
+    return;
+  }
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+    showToast("⚠️ La géolocalisation nécessite HTTPS. Utilise github.io ou un serveur local.");
     return;
   }
   fab.classList.add('loading');
   fab.textContent = '⏳';
+  showToast("📡 Recherche de votre position…", 0);
+
   navigator.geolocation.getCurrentPosition(
     (p) => {
       fab.classList.remove('loading');
       fab.textContent = '📍';
       const pos = [p.coords.latitude, p.coords.longitude];
       setUserPosition(pos, p.coords.accuracy);
-      if (centerView) map.setView(pos, 12);
+      map.setView(pos, 13);
+      showToast(`✅ Position trouvée (précision ±${Math.round(p.coords.accuracy)} m)`);
     },
     (err) => {
       fab.classList.remove('loading');
       fab.textContent = '📍';
-      console.warn('Géoloc:', err.message);
-      if (centerView) {
-        alert("Géolocalisation refusée ou indisponible. Affichage centré sur Pignans.");
-        map.setView(PIGNANS, 12);
-      }
+      const reasons = {
+        1: "❌ Permission refusée. Autorisez la géolocalisation dans les réglages du navigateur, puis rechargez la page.",
+        2: "❌ Position indisponible (pas de GPS / réseau).",
+        3: "❌ Délai dépassé. Réessayez en extérieur."
+      };
+      showToast(reasons[err.code] || `❌ Erreur géoloc : ${err.message}`, 6000);
+      console.warn('Géoloc error:', err);
     },
-    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
   );
 }
 
 // Brancher les deux boutons (sidebar + FAB flottant)
-document.getElementById('locate-btn').addEventListener('click', () => geolocate(true));
-document.getElementById('fab-locate').addEventListener('click', () => geolocate(true));
-
-// Tentative de géoloc automatique au chargement (silencieuse en cas de refus)
-geolocate(false);
+document.getElementById('locate-btn').addEventListener('click', geolocate);
+document.getElementById('fab-locate').addEventListener('click', geolocate);
+// Note: pas d'auto-géoloc au chargement — certains navigateurs (Safari iOS)
+// bloquent silencieusement les appels qui ne sont pas déclenchés par un geste utilisateur.
 
 // ---------------------------------------------------------------------------
 // Liste des spots (sidebar)
@@ -810,6 +871,261 @@ document.getElementById('toggle-sidebar').addEventListener('click', () => {
 });
 
 renderList();
+
+// ===========================================================================
+// COUCHE "POTENTIEL TRUITE"
+// Récupère les cours d'eau OSM via Overpass, échantillonne l'altitude via
+// Open-Elevation, calcule un score d'habitat et les colore sur la carte.
+// ===========================================================================
+
+const habitatLayer = L.layerGroup();
+let habitatVisible = false;
+const elevationCache = new Map(); // "lat,lon" rounded -> elevation
+
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.openstreetmap.fr/api/interpreter'
+];
+
+async function fetchOverpass(query) {
+  for (const url of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(query)
+      });
+      if (res.ok) return await res.json();
+    } catch (e) { console.warn('Overpass endpoint KO:', url, e); }
+  }
+  throw new Error('Tous les serveurs Overpass sont indisponibles.');
+}
+
+async function fetchElevations(points) {
+  // Open-Elevation : POST batch (max ~100 points par requête recommandé)
+  const out = new Array(points.length);
+  const todo = [];
+  points.forEach((p, i) => {
+    const key = `${p[0].toFixed(3)},${p[1].toFixed(3)}`;
+    if (elevationCache.has(key)) out[i] = elevationCache.get(key);
+    else todo.push({ i, p, key });
+  });
+  if (todo.length === 0) return out;
+
+  const CHUNK = 90;
+  for (let off = 0; off < todo.length; off += CHUNK) {
+    const slice = todo.slice(off, off + CHUNK);
+    const body = JSON.stringify({
+      locations: slice.map(t => ({ latitude: t.p[0], longitude: t.p[1] }))
+    });
+    try {
+      const res = await fetch('https://api.open-elevation.com/api/v1/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body
+      });
+      if (!res.ok) throw new Error('Open-Elevation HTTP ' + res.status);
+      const data = await res.json();
+      data.results.forEach((r, k) => {
+        const t = slice[k];
+        elevationCache.set(t.key, r.elevation);
+        out[t.i] = r.elevation;
+      });
+    } catch (e) {
+      console.warn('Open-Elevation KO:', e);
+      // Fallback : altitude inconnue → on note 0 et on rétrograde le score
+      slice.forEach(t => { out[t.i] = null; });
+    }
+  }
+  return out;
+}
+
+// Score d'habitat truite à partir des caractéristiques d'un cours d'eau
+function scoreHabitat({ elevations, length, tags }) {
+  const valid = elevations.filter(e => e != null);
+  if (valid.length < 2) return { score: 0, label: 'Inconnu', color: '#888' };
+
+  const minE = Math.min(...valid);
+  const maxE = Math.max(...valid);
+  const meanE = valid.reduce((a,b)=>a+b,0) / valid.length;
+  const slope = length > 0 ? (maxE - minE) / length * 100 : 0; // %
+
+  let score = 0;
+
+  // Altitude : eau plus fraîche en altitude (Provence ~ <16°C été au-dessus de 400m)
+  if (meanE >= 400) score += 3;
+  else if (meanE >= 250) score += 2;
+  else if (meanE >= 120) score += 1;
+
+  // Pente : courant rapide = oxygénation
+  if (slope >= 2) score += 2;
+  else if (slope >= 0.8) score += 1;
+
+  // Type OSM : un "stream" est plus probablement à truite qu'une "river" lente
+  if (tags.waterway === 'stream') score += 1;
+  if (tags.waterway === 'river') score += 0;
+
+  // Pénalités
+  if (tags.intermittent === 'yes' || tags.seasonal === 'yes') score -= 3;
+  if (tags.waterway === 'canal' || tags.waterway === 'ditch' || tags.waterway === 'drain') score -= 5;
+
+  // Bonus si le nom suggère un vrai cours d'eau salmonicole
+  const name = (tags.name || '').toLowerCase();
+  if (/source|aille|gapeau|caramy|issole|verdon|argens|réal|bresque|riautord/.test(name)) score += 1;
+
+  let label, color;
+  if (score >= 5) { label = 'Très fort'; color = '#1b5e20'; }
+  else if (score >= 3) { label = 'Fort'; color = '#4caf50'; }
+  else if (score >= 1) { label = 'Modéré'; color = '#ff9800'; }
+  else if (score >= -1) { label = 'Faible'; color = '#90a4ae'; }
+  else { label = 'Improbable'; color = '#455a64'; }
+
+  return { score, label, color, meanE, slope };
+}
+
+// Distance haversine en km entre deux points
+function distLine(coords) {
+  let total = 0;
+  for (let i = 1; i < coords.length; i++) {
+    total += distanceKm(coords[i-1], coords[i]);
+  }
+  return total;
+}
+
+// Échantillonne une polyligne tous les ~500m (max 6 points pour rester rapide)
+function samplePolyline(coords, maxSamples = 6) {
+  if (coords.length <= maxSamples) return coords.slice();
+  const step = (coords.length - 1) / (maxSamples - 1);
+  const out = [];
+  for (let i = 0; i < maxSamples; i++) {
+    out.push(coords[Math.round(i * step)]);
+  }
+  return out;
+}
+
+async function loadHabitatLayer() {
+  const fab = document.getElementById('fab-habitat');
+  fab.disabled = true;
+  fab.textContent = '⏳ Analyse…';
+  const toast = showToast("🔎 Récupération des cours d'eau (OSM)…", 0);
+
+  try {
+    const b = map.getBounds();
+    const bbox = `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
+    // Limite raisonnable : éviter les bbox trop larges
+    const area = (b.getNorth()-b.getSouth()) * (b.getEast()-b.getWest());
+    if (area > 0.5) {
+      toast.remove();
+      showToast("🔍 Zoomez davantage avant de lancer l'analyse (zone trop grande).", 5000);
+      fab.disabled = false;
+      fab.textContent = habitatVisible ? '✅ Potentiel truite' : '🗺️ Potentiel truite';
+      return;
+    }
+
+    const query = `
+      [out:json][timeout:25];
+      (
+        way["waterway"~"^(stream|river)$"](${bbox});
+      );
+      out geom tags;
+    `;
+    const data = await fetchOverpass(query);
+    const ways = (data.elements || []).filter(e => e.geometry && e.geometry.length >= 2);
+    if (ways.length === 0) {
+      toast.remove();
+      showToast("Aucun cours d'eau trouvé dans cette zone.", 4000);
+      fab.disabled = false;
+      fab.textContent = '🗺️ Potentiel truite';
+      return;
+    }
+
+    toast.innerHTML = `📐 Calcul d'altitude pour ${ways.length} cours d'eau…`;
+
+    // Échantillons (limités globalement à ~400 points pour rester sous les quotas)
+    const SAMPLES_PER_WAY = ways.length > 60 ? 3 : ways.length > 30 ? 4 : 6;
+    const allSamples = [];
+    const wayMeta = ways.map(w => {
+      const coords = w.geometry.map(p => [p.lat, p.lon]);
+      const samples = samplePolyline(coords, SAMPLES_PER_WAY);
+      const offset = allSamples.length;
+      allSamples.push(...samples);
+      return { coords, samples, offset, length: distLine(coords), tags: w.tags || {}, id: w.id };
+    });
+
+    const elevs = await fetchElevations(allSamples);
+
+    habitatLayer.clearLayers();
+    const stats = { 'Très fort': 0, 'Fort': 0, 'Modéré': 0, 'Faible': 0, 'Improbable': 0, 'Inconnu': 0 };
+
+    wayMeta.forEach(w => {
+      const wayElevs = elevs.slice(w.offset, w.offset + w.samples.length);
+      const sc = scoreHabitat({ elevations: wayElevs, length: w.length, tags: w.tags });
+      stats[sc.label] = (stats[sc.label] || 0) + 1;
+
+      const line = L.polyline(w.coords, {
+        color: sc.color,
+        weight: 4,
+        opacity: 0.85
+      });
+      const name = w.tags.name || w.tags.waterway || 'cours d\'eau';
+      line.bindPopup(`
+        <h3>${name}</h3>
+        <div style="margin:6px 0"><span class="badge" style="background:${sc.color};color:white">Potentiel ${sc.label}</span></div>
+        <div class="info-row"><span class="label">Type</span><span>${w.tags.waterway}</span></div>
+        <div class="info-row"><span class="label">Altitude moy.</span><span>${sc.meanE != null ? Math.round(sc.meanE)+' m' : '—'}</span></div>
+        <div class="info-row"><span class="label">Pente</span><span>${sc.slope != null ? sc.slope.toFixed(2)+' %' : '—'}</span></div>
+        <div class="info-row"><span class="label">Longueur visible</span><span>${w.length.toFixed(2)} km</span></div>
+        <div class="info-row"><span class="label">Score</span><span>${sc.score}</span></div>
+        ${w.tags.intermittent === 'yes' ? '<div style="color:#ff9800;font-size:11px;margin-top:6px">⚠️ Cours d\'eau intermittent (peut s\'assécher)</div>' : ''}
+        <div style="margin-top:8px;font-size:11px;color:var(--muted)">Estimation algorithmique. Vérifier sur place et auprès de l'AAPPMA.</div>
+      `, { maxWidth: 300 });
+      line.addTo(habitatLayer);
+    });
+
+    habitatLayer.addTo(map);
+    habitatVisible = true;
+    fab.classList.add('active');
+    fab.textContent = '✅ Potentiel truite';
+    toast.remove();
+    const summary = `Très fort: ${stats['Très fort']} · Fort: ${stats['Fort']} · Modéré: ${stats['Modéré']}`;
+    showToast(`✅ ${ways.length} cours d'eau analysés. ${summary}`, 5000);
+  } catch (e) {
+    console.error(e);
+    showToast("❌ Erreur lors de l'analyse : " + e.message, 5000);
+  } finally {
+    fab.disabled = false;
+  }
+}
+
+function toggleHabitat() {
+  if (habitatVisible) {
+    map.removeLayer(habitatLayer);
+    habitatVisible = false;
+    document.getElementById('fab-habitat').classList.remove('active');
+    document.getElementById('fab-habitat').textContent = '🗺️ Potentiel truite';
+  } else {
+    loadHabitatLayer();
+  }
+}
+
+document.getElementById('fab-habitat').addEventListener('click', toggleHabitat);
+
+// Mise à jour de la légende pour inclure la couche habitat
+const habitatLegend = L.control({ position: 'bottomleft' });
+habitatLegend.onAdd = function() {
+  const div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = `
+    <h4>Potentiel habitat truite</h4>
+    <div class="item"><span class="swatch" style="background:#1b5e20;border-radius:2px;height:4px;width:20px"></span>Très fort</div>
+    <div class="item"><span class="swatch" style="background:#4caf50;border-radius:2px;height:4px;width:20px"></span>Fort</div>
+    <div class="item"><span class="swatch" style="background:#ff9800;border-radius:2px;height:4px;width:20px"></span>Modéré</div>
+    <div class="item"><span class="swatch" style="background:#90a4ae;border-radius:2px;height:4px;width:20px"></span>Faible</div>
+    <div style="margin-top:6px;font-size:10px;color:var(--muted);max-width:200px">Basé sur altitude, pente et type OSM. Indicatif uniquement.</div>
+  `;
+  return div;
+};
+habitatLegend.addTo(map);
 </script>
 </body>
 </html>
