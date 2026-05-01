@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>PecheMap — Spots de pêche à la truite (Var)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<style>
+  :root {
+    --bg: #0f1720;
+    --panel: #182230;
+    --panel-2: #1f2b3a;
+    --text: #e6edf3;
+    --muted: #9aa7b4;
+    --accent: #4fc3f7;
+    --easy: #4caf50;
+    --medium: #ff9800;
+    --hard: #f44336;
+    --border: #2a3a4d;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+  }
+  #app {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    height: 100vh;
+  }
+  #sidebar {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(135deg, #1a2a3e 0%, #1f2b3a 100%);
+  }
+  #header h1 {
+    margin: 0;
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #header .subtitle {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  #controls {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .filter-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .chip {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+  }
+  .chip:hover { border-color: var(--accent); }
+  .chip.active { background: var(--accent); color: #0f1720; border-color: var(--accent); }
+  .chip .dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  button.locate {
+    background: var(--accent);
+    color: #0f1720;
+    border: none;
+    padding: 10px;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button.locate:hover { opacity: 0.9; }
+  #spots-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+  .spot-card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .spot-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .spot-card.active { border-color: var(--accent); background: #233448; }
+  .spot-card h3 {
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .spot-card .river {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .spot-card .meta {
+    display: flex;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    flex-wrap: wrap;
+  }
+  .badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+  .badge.easy { background: var(--easy); color: white; }
+  .badge.medium { background: var(--medium); color: white; }
+  .badge.hard { background: var(--hard); color: white; }
+  #map {
+    height: 100vh;
+    width: 100%;
+  }
+  .leaflet-popup-content-wrapper {
+    background: var(--panel);
+    color: var(--text);
+    border-radius: 8px;
+  }
+  .leaflet-popup-tip { background: var(--panel); }
+  .leaflet-popup-content {
+    margin: 12px 14px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .leaflet-popup-content h3 { margin: 0 0 6px 0; font-size: 15px; }
+  .leaflet-popup-content .info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .leaflet-popup-content .info-row:last-child { border-bottom: none; }
+  .leaflet-popup-content .label { color: var(--muted); font-size: 11px; }
+  .user-marker {
+    background: var(--accent);
+    border: 3px solid white;
+    border-radius: 50%;
+    width: 18px;
+    height: 18px;
+    box-shadow: 0 0 0 8px rgba(79, 195, 247, 0.3);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0.6); }
+    70% { box-shadow: 0 0 0 18px rgba(79, 195, 247, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(79, 195, 247, 0); }
+  }
+  .fish-marker {
+    width: 28px;
+    height: 28px;
+    border-radius: 50% 50% 50% 0;
+    transform: rotate(-45deg);
+    border: 2px solid white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
+  .fish-marker span {
+    transform: rotate(45deg);
+    font-size: 14px;
+  }
+  .legend {
+    background: var(--panel);
+    color: var(--text);
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .legend h4 { margin: 0 0 6px 0; font-size: 12px; }
+  .legend .item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .legend .swatch { width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; }
+  #toggle-sidebar {
+    display: none;
+    position: absolute;
+    top: 10px; left: 10px;
+    z-index: 1000;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .empty {
+    color: var(--muted);
+    text-align: center;
+    padding: 20px;
+    font-size: 13px;
+  }
+  .disclaimer {
+    padding: 10px 16px;
+    font-size: 10px;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    line-height: 1.4;
+  }
+  @media (max-width: 768px) {
+    #app { grid-template-columns: 1fr; }
+    #sidebar {
+      position: absolute;
+      z-index: 1000;
+      width: 90%;
+      max-width: 360px;
+      height: 100%;
+      transform: translateX(-100%);
+      transition: transform 0.25s;
+    }
+    #sidebar.open { transform: translateX(0); }
+    #toggle-sidebar { display: block; }
+  }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <aside id="sidebar">
+    <div id="header">
+      <h1>🎣 PecheMap</h1>
+      <div class="subtitle">Spots truite — Var (Pignans &amp; alentours)</div>
+    </div>
+
+    <div id="controls">
+      <button class="locate" id="locate-btn">📍 Centrer sur ma position</button>
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Difficulté</div>
+        <div class="filter-row" id="filter-difficulty">
+          <span class="chip active" data-filter="all">Tous</span>
+          <span class="chip" data-filter="easy"><span class="dot" style="background:var(--easy)"></span>Facile</span>
+          <span class="chip" data-filter="medium"><span class="dot" style="background:var(--medium)"></span>Moyen</span>
+          <span class="chip" data-filter="hard"><span class="dot" style="background:var(--hard)"></span>Difficile</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="spots-list"></div>
+
+    <div class="disclaimer">
+      ⚠️ Données indicatives. Carte de pêche AAPPMA obligatoire (cartedepeche.fr).
+      Vérifiez la réglementation locale (1ère catégorie, ouverture mars→sept., taille mini 23 cm).
+      Respectez la nature et les berges privées.
+    </div>
+  </aside>
+
+  <button id="toggle-sidebar">☰ Spots</button>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+// ---------------------------------------------------------------------------
+// Pignans, Var (83) — coordonnées de référence
+// ---------------------------------------------------------------------------
+const PIGNANS = [43.302, 6.226];
+
+// ---------------------------------------------------------------------------
+// Spots de pêche à la truite — Var et abords
+// Sources : AAPPMA du Var, cours d'eau classés 1ère catégorie (Salmonidés).
+// Les coordonnées pointent vers des accès fréquemment utilisés.
+// ---------------------------------------------------------------------------
+const SPOTS = [
+  {
+    name: "Réal Martin — Pont de la Portanière",
+    river: "Le Réal Martin",
+    coords: [43.247, 6.150],
+    difficulty: "easy",
+    species: ["Truite fario", "Vairon"],
+    category: "1ère catégorie",
+    technique: "Toc, ultra-léger, mouche sèche",
+    parking: "Bord de D14, parking à proximité",
+    aappma: "La Gaule Pierrefeucaine",
+    notes: "Beau parcours en eau vive entre Pierrefeu et Cuers. Bonne densité de fario sauvages au printemps."
+  },
+  {
+    name: "Réal Martin — Amont Cuers",
+    river: "Le Réal Martin",
+    coords: [43.243, 6.080],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Mouche, toc fin",
+    parking: "Chemins forestiers, accès à pied",
+    aappma: "La Gaule Pierrefeucaine",
+    notes: "Secteur encaissé, végétation dense. Idéal pour les amateurs de petits coups discrets."
+  },
+  {
+    name: "Issole — Forcalqueiret",
+    river: "L'Issole",
+    coords: [43.353, 6.046],
+    difficulty: "easy",
+    species: ["Truite fario", "Goujon"],
+    category: "1ère catégorie",
+    technique: "Toc, leurre souple, mouche",
+    parking: "Centre village, accès facile",
+    aappma: "AAPPMA de l'Issole",
+    notes: "Cours d'eau accessible avec belles fosses. Réservoirs déversés en début de saison."
+  },
+  {
+    name: "Issole — Garéoult",
+    river: "L'Issole",
+    coords: [43.380, 5.994],
+    difficulty: "easy",
+    species: ["Truite fario", "Truite arc-en-ciel"],
+    category: "1ère catégorie",
+    technique: "Tous types",
+    parking: "Pont du moulin, parking",
+    aappma: "AAPPMA de l'Issole",
+    notes: "Spot familial, lâchers réguliers. Bon pour débuter."
+  },
+  {
+    name: "Issole — Néoules",
+    river: "L'Issole",
+    coords: [43.328, 5.984],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Mouche, toc",
+    parking: "Bord de route, places limitées",
+    aappma: "AAPPMA de l'Issole",
+    notes: "Truites farios sauvages dans secteur boisé."
+  },
+  {
+    name: "Caramy — Mazaugues / La Roquebrussanne",
+    river: "Le Caramy",
+    coords: [43.382, 5.917],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Mouche, toc",
+    parking: "Source de la Foux, parking ombragé",
+    aappma: "AAPPMA de Brignoles",
+    notes: "Source du Caramy, eau très fraîche. Truites sauvages, secteur préservé."
+  },
+  {
+    name: "Caramy — Tourves",
+    river: "Le Caramy",
+    coords: [43.412, 5.927],
+    difficulty: "easy",
+    species: ["Truite arc-en-ciel", "Truite fario"],
+    category: "1ère catégorie",
+    technique: "Toc, leurre, appât naturel",
+    parking: "Lavoir / pont, accès facile",
+    aappma: "AAPPMA de Brignoles",
+    notes: "Lâchers de truites arc en début de saison, grande accessibilité."
+  },
+  {
+    name: "Aille — Le Cannet-des-Maures",
+    river: "L'Aille",
+    coords: [43.396, 6.358],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Toc, mouche",
+    parking: "Chemin de l'Aille, accès à pied",
+    aappma: "AAPPMA Vidauban-Le Cannet",
+    notes: "Rivière des Maures, fonds rocheux. Beau parcours sauvage."
+  },
+  {
+    name: "Aille — Vidauban (amont)",
+    river: "L'Aille",
+    coords: [43.430, 6.430],
+    difficulty: "hard",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Mouche, toc fin",
+    parking: "Pistes DFCI, 4x4 conseillé",
+    aappma: "AAPPMA Vidauban-Le Cannet",
+    notes: "Parcours sauvage très encaissé. Réservé aux pêcheurs sportifs."
+  },
+  {
+    name: "Gapeau — Belgentier",
+    river: "Le Gapeau",
+    coords: [43.244, 6.011],
+    difficulty: "easy",
+    species: ["Truite fario", "Truite arc-en-ciel"],
+    category: "1ère catégorie",
+    technique: "Tous types",
+    parking: "Centre village",
+    aappma: "AAPPMA Le Gapeau",
+    notes: "Joli parcours en bord de village, très fréquenté à l'ouverture."
+  },
+  {
+    name: "Gapeau — Méounes-lès-Montrieux",
+    river: "Le Gapeau",
+    coords: [43.300, 5.943],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Mouche, toc",
+    parking: "Bord de D554",
+    aappma: "AAPPMA Le Gapeau",
+    notes: "Source du Gapeau, eau fraîche toute l'année."
+  },
+  {
+    name: "Gapeau — Signes (source)",
+    river: "Le Gapeau",
+    coords: [43.286, 5.857],
+    difficulty: "hard",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Mouche sèche, nymphe au fil",
+    parking: "Limité, accès pédestre",
+    aappma: "AAPPMA Le Gapeau",
+    notes: "Source karstique, truites farios méfiantes. Approche discrète indispensable."
+  },
+  {
+    name: "Bresque — Sillans-la-Cascade",
+    river: "La Bresque",
+    coords: [43.560, 6.180],
+    difficulty: "medium",
+    species: ["Truite fario"],
+    category: "1ère catégorie",
+    technique: "Mouche, toc",
+    parking: "Parking de la cascade",
+    aappma: "AAPPMA Salernes-Sillans",
+    notes: "Site classé, pêche autorisée hors zone cascade. Eau cristalline."
+  },
+  {
+    name: "Bresque — Salernes",
+    river: "La Bresque",
+    coords: [43.575, 6.235],
+    difficulty: "easy",
+    species: ["Truite fario", "Truite arc-en-ciel"],
+    category: "1ère catégorie",
+    technique: "Tous types",
+    parking: "Multiples accès en village",
+    aappma: "AAPPMA Salernes-Sillans",
+    notes: "Parcours école sur certains tronçons. Lâchers réguliers."
+  },
+  {
+    name: "Argens — Châteauvert",
+    river: "L'Argens",
+    coords: [43.488, 6.043],
+    difficulty: "medium",
+    species: ["Truite fario", "Chevesne"],
+    category: "1ère catégorie (amont)",
+    technique: "Toc, mouche, leurre",
+    parking: "Vallon Sourn, parking",
+    aappma: "AAPPMA de Brignoles",
+    notes: "Gorges du Vallon Sourn, cadre exceptionnel. Pêche en marchant dans l'eau."
+  },
+  {
+    name: "Lac de Carcès",
+    river: "Lac de Carcès",
+    coords: [43.477, 6.182],
+    difficulty: "easy",
+    species: ["Truite arc-en-ciel", "Brochet", "Sandre"],
+    category: "2ème catégorie",
+    technique: "Lancer, leurre, mort manié",
+    parking: "Plusieurs parkings autour du lac",
+    aappma: "AAPPMA de Carcès",
+    notes: "Plan d'eau, alternative quand les rivières sont trop basses. Lâchers de truites arc-en-ciel."
+  }
+];
+
+// ---------------------------------------------------------------------------
+// Carte
+// ---------------------------------------------------------------------------
+const map = L.map('map', { zoomControl: true }).setView(PIGNANS, 11);
+
+L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap France | &copy; OpenStreetMap'
+}).addTo(map);
+
+// Marqueur Pignans (référence par défaut)
+L.marker(PIGNANS, {
+  icon: L.divIcon({
+    className: '',
+    html: '<div style="background:#fff;color:#0f1720;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;border:1px solid #2a3a4d;white-space:nowrap">📍 Pignans</div>',
+    iconSize: [70, 20],
+    iconAnchor: [35, 10]
+  })
+}).addTo(map);
+
+// Légende
+const legend = L.control({ position: 'bottomright' });
+legend.onAdd = function() {
+  const div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = `
+    <h4>Difficulté</h4>
+    <div class="item"><span class="swatch" style="background:#4caf50"></span>Facile / accessible</div>
+    <div class="item"><span class="swatch" style="background:#ff9800"></span>Moyen</div>
+    <div class="item"><span class="swatch" style="background:#f44336"></span>Difficile / sauvage</div>
+  `;
+  return div;
+};
+legend.addTo(map);
+
+// ---------------------------------------------------------------------------
+// Création des marqueurs spots
+// ---------------------------------------------------------------------------
+const COLORS = { easy: '#4caf50', medium: '#ff9800', hard: '#f44336' };
+const LABELS = { easy: 'Facile', medium: 'Moyen', hard: 'Difficile' };
+
+function makeSpotIcon(difficulty) {
+  return L.divIcon({
+    className: '',
+    html: `<div class="fish-marker" style="background:${COLORS[difficulty]}"><span>🎣</span></div>`,
+    iconSize: [28, 36],
+    iconAnchor: [14, 36],
+    popupAnchor: [0, -34]
+  });
+}
+
+function distanceKm(a, b) {
+  const R = 6371;
+  const dLat = (b[0]-a[0]) * Math.PI/180;
+  const dLon = (b[1]-a[1]) * Math.PI/180;
+  const lat1 = a[0] * Math.PI/180;
+  const lat2 = b[0] * Math.PI/180;
+  const x = Math.sin(dLat/2)**2 + Math.sin(dLon/2)**2 * Math.cos(lat1) * Math.cos(lat2);
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+const markers = {};
+SPOTS.forEach((spot, i) => {
+  const marker = L.marker(spot.coords, { icon: makeSpotIcon(spot.difficulty) }).addTo(map);
+  marker.bindPopup(buildPopup(spot));
+  marker.on('click', () => highlightCard(i));
+  markers[i] = marker;
+});
+
+function buildPopup(spot) {
+  const dist = userPos ? distanceKm(userPos, spot.coords).toFixed(1) + ' km' : '—';
+  const gmaps = `https://www.google.com/maps/dir/?api=1&destination=${spot.coords[0]},${spot.coords[1]}`;
+  return `
+    <h3>${spot.name}</h3>
+    <div style="margin-bottom:8px">
+      <span class="badge ${spot.difficulty}">${LABELS[spot.difficulty]}</span>
+    </div>
+    <div class="info-row"><span class="label">Cours d'eau</span><span>${spot.river}</span></div>
+    <div class="info-row"><span class="label">Catégorie</span><span>${spot.category}</span></div>
+    <div class="info-row"><span class="label">Espèces</span><span>${spot.species.join(', ')}</span></div>
+    <div class="info-row"><span class="label">Technique</span><span>${spot.technique}</span></div>
+    <div class="info-row"><span class="label">AAPPMA</span><span>${spot.aappma}</span></div>
+    <div class="info-row"><span class="label">Parking</span><span>${spot.parking}</span></div>
+    <div class="info-row"><span class="label">Distance</span><span id="dist-${spot.coords[0]}">${dist}</span></div>
+    <div style="margin-top:8px;font-size:11px;color:var(--muted)">${spot.notes}</div>
+    <a href="${gmaps}" target="_blank" rel="noopener"
+       style="display:inline-block;margin-top:8px;color:var(--accent);text-decoration:none;font-size:12px">
+       🧭 Itinéraire Google Maps →
+    </a>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Géolocalisation
+// ---------------------------------------------------------------------------
+let userPos = null;
+let userMarker = null;
+let userCircle = null;
+
+function setUserPosition(pos, accuracy) {
+  userPos = pos;
+  if (userMarker) {
+    userMarker.setLatLng(pos);
+    userCircle.setLatLng(pos).setRadius(accuracy || 50);
+  } else {
+    userMarker = L.marker(pos, {
+      icon: L.divIcon({ className: '', html: '<div class="user-marker"></div>', iconSize: [18, 18], iconAnchor: [9,9] })
+    }).addTo(map).bindPopup('Vous êtes ici');
+    userCircle = L.circle(pos, {
+      radius: accuracy || 50,
+      color: '#4fc3f7', fillColor: '#4fc3f7', fillOpacity: 0.1, weight: 1
+    }).addTo(map);
+  }
+  renderList();
+}
+
+document.getElementById('locate-btn').addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    alert("Géolocalisation non supportée. Position par défaut : Pignans.");
+    setUserPosition(PIGNANS, 100);
+    map.setView(PIGNANS, 12);
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      const pos = [p.coords.latitude, p.coords.longitude];
+      setUserPosition(pos, p.coords.accuracy);
+      map.setView(pos, 12);
+    },
+    (err) => {
+      console.warn(err);
+      alert("Impossible d'obtenir votre position. Utilisation de Pignans par défaut.");
+      setUserPosition(PIGNANS, 100);
+      map.setView(PIGNANS, 12);
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
+});
+
+// Position initiale par défaut : Pignans (au cas où l'utilisateur refuse la géoloc)
+setUserPosition(PIGNANS, 100);
+
+// ---------------------------------------------------------------------------
+// Liste des spots (sidebar)
+// ---------------------------------------------------------------------------
+let activeFilter = 'all';
+const listEl = document.getElementById('spots-list');
+
+function renderList() {
+  const ref = userPos || PIGNANS;
+  const visible = SPOTS
+    .map((s, i) => ({ ...s, _i: i, _d: distanceKm(ref, s.coords) }))
+    .filter(s => activeFilter === 'all' || s.difficulty === activeFilter)
+    .sort((a, b) => a._d - b._d);
+
+  if (visible.length === 0) {
+    listEl.innerHTML = '<div class="empty">Aucun spot pour ce filtre.</div>';
+    return;
+  }
+
+  listEl.innerHTML = visible.map(s => `
+    <div class="spot-card" data-idx="${s._i}">
+      <h3>
+        <span>${s.name}</span>
+        <span class="badge ${s.difficulty}">${LABELS[s.difficulty]}</span>
+      </h3>
+      <div class="river">${s.river} · ${s.category}</div>
+      <div class="meta">
+        <span>📏 ${s._d.toFixed(1)} km</span>
+        <span>🐟 ${s.species[0]}</span>
+        <span>🎯 ${s.technique.split(',')[0]}</span>
+      </div>
+    </div>
+  `).join('');
+
+  listEl.querySelectorAll('.spot-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const idx = parseInt(card.dataset.idx);
+      const spot = SPOTS[idx];
+      map.setView(spot.coords, 14);
+      markers[idx].openPopup();
+      highlightCard(idx);
+      if (window.innerWidth <= 768) {
+        document.getElementById('sidebar').classList.remove('open');
+      }
+    });
+  });
+}
+
+function highlightCard(idx) {
+  document.querySelectorAll('.spot-card').forEach(c => c.classList.remove('active'));
+  const card = document.querySelector(`.spot-card[data-idx="${idx}"]`);
+  if (card) {
+    card.classList.add('active');
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+// Filtres
+document.querySelectorAll('#filter-difficulty .chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('#filter-difficulty .chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    activeFilter = chip.dataset.filter;
+
+    Object.entries(markers).forEach(([i, m]) => {
+      const visible = activeFilter === 'all' || SPOTS[i].difficulty === activeFilter;
+      if (visible) m.addTo(map); else map.removeLayer(m);
+    });
+    renderList();
+  });
+});
+
+// Sidebar mobile
+document.getElementById('toggle-sidebar').addEventListener('click', () => {
+  document.getElementById('sidebar').classList.toggle('open');
+});
+
+renderList();
+</script>
+</body>
+</html>
