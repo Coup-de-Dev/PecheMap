@@ -1311,9 +1311,6 @@ function accessibilityColor(distM) {
 }
 
 async function showFullRiver(name, lat, lon) {
-  const cleanup = () => {
-    document.getElementById('fab-back-river').style.display = 'none';
-  };
   showToast(`📡 Chargement de "${name}"…`, 0);
 
   try {
@@ -1333,6 +1330,11 @@ async function showFullRiver(name, lat, lon) {
       showToast(`Aucun segment trouvé pour "${name}"`, 4000);
       return;
     }
+
+    // ⬇️  ISOLEMENT VISUEL : on cache tout sauf la rivière en cours
+    // (habitat + lacs + autres rivières + marqueurs de spots)
+    if (habitatVisible) map.removeLayer(habitatLayer);
+    Object.values(markers).forEach(m => map.removeLayer(m));
 
     // 2) Bbox englobante de tous les segments
     let minLat=Infinity, maxLat=-Infinity, minLon=Infinity, maxLon=-Infinity;
@@ -1423,6 +1425,15 @@ window.showFullRiver = showFullRiver;
 function clearFullRiver() {
   riverLayer.clearLayers();
   map.removeLayer(riverLayer);
+
+  // ⬇️  RESTAURATION : on remet l'état précédent (habitat + spots filtrés)
+  if (habitatVisible) habitatLayer.addTo(map);
+  Object.entries(markers).forEach(([i, m]) => {
+    const idx = parseInt(i);
+    const visible = activeFilter === 'all' || SPOTS[idx].difficulty === activeFilter;
+    if (visible) m.addTo(map);
+  });
+
   document.getElementById('fab-back-river').style.display = 'none';
   showToast("Vue rivière complète fermée.", 2000);
 }
