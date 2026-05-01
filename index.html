@@ -698,6 +698,15 @@ function distanceKm(a, b) {
 }
 
 const markers = {};
+
+// ---------------------------------------------------------------------------
+// État utilisateur — DOIT être déclaré avant SPOTS.forEach car buildPopup()
+// référence userPos (sinon TDZ ReferenceError qui casse tout le script).
+// ---------------------------------------------------------------------------
+let userPos = null;
+let userMarker = null;
+let userCircle = null;
+
 SPOTS.forEach((spot, i) => {
   const marker = L.marker(spot.coords, { icon: makeSpotIcon(spot.difficulty) }).addTo(map);
   marker.bindPopup(buildPopup(spot), { maxWidth: 320, minWidth: 240 });
@@ -737,10 +746,6 @@ function buildPopup(spot) {
 // ---------------------------------------------------------------------------
 // Géolocalisation
 // ---------------------------------------------------------------------------
-let userPos = null;
-let userMarker = null;
-let userCircle = null;
-
 function setUserPosition(pos, accuracy) {
   userPos = pos;
   if (userMarker) {
