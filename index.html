@@ -265,6 +265,25 @@
     border-color: #4caf50;
   }
   .fab-habitat:disabled { opacity: 0.6; cursor: wait; }
+  .fab-back-river {
+    position: absolute;
+    left: 14px;
+    top: 14px;
+    z-index: 1000;
+    height: 40px;
+    padding: 0 14px;
+    border-radius: 20px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    display: none;
+    align-items: center;
+    gap: 6px;
+  }
   .toast {
     position: absolute;
     bottom: 30px;
@@ -368,6 +387,7 @@
   <div id="map"></div>
   <button class="fab-habitat" id="fab-habitat" title="Afficher les cours d'eau colorés par potentiel truite">🗺️ Potentiel truite</button>
   <button class="fab-locate" id="fab-locate" title="Me géolocaliser">📍</button>
+  <button class="fab-back-river" id="fab-back-river" onclick="clearFullRiver()" title="Fermer la vue rivière">← Retour</button>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -955,6 +975,7 @@ renderList();
 const habitatLayer = L.layerGroup();
 let habitatVisible = false;
 const elevationCache = new Map(); // "lat,lon" rounded -> elevation
+const riverLayer = L.layerGroup(); // couche dédiée à la rivière complète + accessibilité
 
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -1163,6 +1184,15 @@ async function loadHabitatLayer() {
       stats[sc.label] = (stats[sc.label] || 0) + 1;
       const name = w.tags.name || 'Cours d\'eau sans nom';
 
+      const safeName = (w.tags.name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      const midPoint = w.coords[Math.floor(w.coords.length / 2)];
+      const fullRiverBtn = w.tags.name
+        ? `<button onclick="showFullRiver('${safeName}', ${midPoint[0]}, ${midPoint[1]})"
+             style="margin-top:10px;width:100%;padding:8px;border:none;border-radius:6px;background:#4fc3f7;color:#0f1720;font-weight:700;cursor:pointer;font-size:12px">
+             🔍 Voir la rivière en entier (accessibilité)
+           </button>`
+        : '<div style="margin-top:8px;font-size:11px;color:var(--muted)">Cours d\'eau sans nom — analyse complète indisponible.</div>';
+
       const popupHtml = `
         <h3>${name}</h3>
         <div style="margin:6px 0"><span class="badge" style="background:${sc.color};color:#0f1720;font-weight:700">Potentiel ${sc.label}${sc.isKnown ? ' ⭐' : ''}</span></div>
@@ -1172,6 +1202,7 @@ async function loadHabitatLayer() {
         <div class="info-row"><span class="label">Longueur visible</span><span>${w.length.toFixed(2)} km</span></div>
         ${sc.isKnown ? '<div style="color:#4fc3f7;font-size:11px;margin-top:6px">⭐ Rivière référencée comme salmonicole dans le Var</div>' : ''}
         ${w.tags.intermittent === 'yes' ? '<div style="color:#ff9800;font-size:11px;margin-top:6px">⚠️ Cours d\'eau intermittent (peut s\'assécher en été)</div>' : ''}
+        ${fullRiverBtn}
         <div style="margin-top:8px;font-size:11px;color:var(--muted)">Estimation algorithmique. Vérifiez auprès de votre AAPPMA.</div>
       `;
 
@@ -1250,6 +1281,152 @@ async function loadHabitatLayer() {
     fab.disabled = false;
   }
 }
+
+// ===========================================================================
+// "Voir la rivière en entier" — affiche tous les segments OSM portant le même
+// nom, et colore chaque tronçon par sa distance à la route la plus proche
+// (proxy d'accessibilité pour le pêcheur).
+// ===========================================================================
+
+function distanceMeters(a, b) {
+  return distanceKm(a, b) * 1000;
+}
+
+// Distance min en mètres entre un point et un nuage de points (échantillonnés)
+function nearestRoadDistance(point, roadPoints) {
+  let min = Infinity;
+  for (let i = 0; i < roadPoints.length; i++) {
+    const d = distanceMeters(point, roadPoints[i]);
+    if (d < min) min = d;
+    if (min < 5) return min; // optimisation : on arrête dès qu'on est à 5m
+  }
+  return min;
+}
+
+function accessibilityColor(distM) {
+  if (distM < 80)  return { color: '#00e676', label: 'Bord de route' };
+  if (distM < 200) return { color: '#ffeb3b', label: 'Marche courte' };
+  if (distM < 500) return { color: '#ff9800', label: 'Sentier / 10-15 min' };
+  return { color: '#e53935', label: 'Sauvage / éloigné' };
+}
+
+async function showFullRiver(name, lat, lon) {
+  const cleanup = () => {
+    document.getElementById('fab-back-river').style.display = 'none';
+  };
+  showToast(`📡 Chargement de "${name}"…`, 0);
+
+  try {
+    // 1) Tous les segments OSM portant ce nom dans un rayon de 50 km
+    const escName = name.replace(/"/g, '\\"');
+    const segQuery = `
+      [out:json][timeout:30];
+      way["waterway"~"^(stream|river)$"]["name"="${escName}"](around:50000,${lat},${lon});
+      out geom tags;
+    `;
+    const segData = await fetchOverpass(segQuery);
+    const segments = (segData.elements || [])
+      .filter(e => e.geometry && e.geometry.length >= 2 &&
+                   (e.tags?.waterway === 'stream' || e.tags?.waterway === 'river'));
+
+    if (segments.length === 0) {
+      showToast(`Aucun segment trouvé pour "${name}"`, 4000);
+      return;
+    }
+
+    // 2) Bbox englobante de tous les segments
+    let minLat=Infinity, maxLat=-Infinity, minLon=Infinity, maxLon=-Infinity;
+    segments.forEach(s => s.geometry.forEach(p => {
+      if (p.lat < minLat) minLat = p.lat;
+      if (p.lat > maxLat) maxLat = p.lat;
+      if (p.lon < minLon) minLon = p.lon;
+      if (p.lon > maxLon) maxLon = p.lon;
+    }));
+    // Petit padding pour capter les routes à proximité immédiate
+    const pad = 0.005;
+    const bbox = `${minLat-pad},${minLon-pad},${maxLat+pad},${maxLon+pad}`;
+
+    showToast(`🛣️ Récupération des routes du secteur…`, 0);
+
+    // 3) Toutes les routes carrossables dans le bbox (on exclut les sentiers
+    //    pour mesurer la *vraie* accessibilité véhicule)
+    const roadQuery = `
+      [out:json][timeout:30];
+      way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track|living_street)$"](${bbox});
+      out geom;
+    `;
+    const roadData = await fetchOverpass(roadQuery);
+    const roadPoints = [];
+    (roadData.elements || []).forEach(r => {
+      if (!r.geometry) return;
+      // Échantillonnage : on prend 1 point sur 2 pour limiter le coût
+      for (let i = 0; i < r.geometry.length; i += 2) {
+        roadPoints.push([r.geometry[i].lat, r.geometry[i].lon]);
+      }
+    });
+
+    if (roadPoints.length === 0) {
+      showToast("Aucune route trouvée dans le secteur — coloration impossible.", 4000);
+      return;
+    }
+
+    showToast(`📏 Calcul d'accessibilité (${roadPoints.length} pts route)…`, 0);
+
+    // 4) Pour chaque tronçon de la rivière, on calcule la distance
+    //    minimale à une route et on colore en conséquence
+    riverLayer.clearLayers();
+    const stats = { 'Bord de route': 0, 'Marche courte': 0, 'Sentier / 10-15 min': 0, 'Sauvage / éloigné': 0 };
+    let totalKm = 0;
+
+    segments.forEach(seg => {
+      const coords = seg.geometry.map(p => [p.lat, p.lon]);
+      for (let i = 0; i < coords.length - 1; i++) {
+        const a = coords[i], b = coords[i+1];
+        const mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
+        const distRoad = nearestRoadDistance(mid, roadPoints);
+        const acc = accessibilityColor(distRoad);
+        stats[acc.label] = (stats[acc.label] || 0) + 1;
+        const segLen = distanceKm(a, b);
+        totalKm += segLen;
+
+        // Contour blanc + ligne colorée
+        L.polyline([a, b], { color: '#ffffff', weight: 7, opacity: 0.85 }).addTo(riverLayer);
+        const line = L.polyline([a, b], { color: acc.color, weight: 4, opacity: 1 });
+        line.bindPopup(`
+          <b>${name}</b><br>
+          <span style="background:${acc.color};color:#0f1720;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700">${acc.label}</span><br>
+          <span style="font-size:11px;color:var(--muted)">Distance route la plus proche : <b>${Math.round(distRoad)} m</b></span>
+        `);
+        line.addTo(riverLayer);
+      }
+    });
+
+    riverLayer.addTo(map);
+
+    // 5) Centrer la carte sur la rivière complète
+    const allPoints = segments.flatMap(s => s.geometry.map(p => [p.lat, p.lon]));
+    map.fitBounds(L.latLngBounds(allPoints), { padding: [40, 40] });
+
+    // 6) Bouton retour
+    const backBtn = document.getElementById('fab-back-river');
+    backBtn.style.display = 'flex';
+
+    const summary = `🟢 ${stats['Bord de route']} bord route · 🟡 ${stats['Marche courte']} marche · 🟠 ${stats['Sentier / 10-15 min']} sentier · 🔴 ${stats['Sauvage / éloigné']} sauvage`;
+    showToast(`✅ <b>${name}</b> — ${totalKm.toFixed(1)} km cartographiés.<br>${summary}`, 8000);
+  } catch (e) {
+    console.error(e);
+    showToast("❌ Erreur : " + e.message, 5000);
+  }
+}
+window.showFullRiver = showFullRiver;
+
+function clearFullRiver() {
+  riverLayer.clearLayers();
+  map.removeLayer(riverLayer);
+  document.getElementById('fab-back-river').style.display = 'none';
+  showToast("Vue rivière complète fermée.", 2000);
+}
+window.clearFullRiver = clearFullRiver;
 
 function toggleHabitat() {
   if (habitatVisible) {
