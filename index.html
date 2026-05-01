@@ -1506,6 +1506,8 @@ async function showFullRiver(name, lat, lon) {
         node["waterway"="waterfall"](${bbox});
         way["waterway"~"^(waterfall|rapids)$"](${bbox});
         way["man_made"~"^(weir|dam)$"](${bbox});
+        node["amenity"="parking"](${bbox});
+        way["amenity"="parking"](${bbox});
       );
       out geom tags;
     `;
@@ -1657,7 +1659,45 @@ async function showFullRiver(name, lat, lon) {
     const cascades = [...cascadesOSM, ...cascadesAlgo];
     const rapids   = [...rapidsOSM,   ...rapidsAlgo];
 
-    currentRiverData = { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, cascades, rapids, allPoints: segments.flatMap(s => s.geometry.map(p => [p.lat, p.lon])) };
+    // ---- Parkings : on extrait tous ceux du bbox, puis on garde uniquement
+    //      ceux à moins de 500 m d'une cascade (= utilisables pour pêcher
+    //      la fosse en aval). Pour chaque cascade on note la distance.
+    const allParkings = elems
+      .filter(e => e.tags?.amenity === 'parking')
+      .map(e => {
+        let lat, lon;
+        if (e.type === 'node') { lat = e.lat; lon = e.lon; }
+        else if (e.geometry?.length) {
+          const sum = e.geometry.reduce((acc, p) => ({ lat: acc.lat + p.lat, lon: acc.lon + p.lon }), { lat: 0, lon: 0 });
+          lat = sum.lat / e.geometry.length;
+          lon = sum.lon / e.geometry.length;
+        } else return null;
+        return {
+          lat, lon,
+          name: e.tags?.name,
+          capacity: e.tags?.capacity,
+          fee: e.tags?.fee,
+          surface: e.tags?.surface,
+          access: e.tags?.access
+        };
+      }).filter(Boolean);
+
+    const parkingsNearCascade = new Map(); // dedup by lat,lon string
+    cascades.forEach(c => {
+      let nearest = null, minDist = Infinity;
+      for (const p of allParkings) {
+        const d = distanceMeters([c.lat, c.lon], [p.lat, p.lon]);
+        if (d < minDist) { minDist = d; nearest = p; }
+      }
+      if (nearest && minDist <= 500) {
+        c.nearestParking = { ...nearest, distance: minDist };
+        const key = `${nearest.lat.toFixed(5)},${nearest.lon.toFixed(5)}`;
+        if (!parkingsNearCascade.has(key)) parkingsNearCascade.set(key, nearest);
+      }
+    });
+    const parkings = [...parkingsNearCascade.values()];
+
+    currentRiverData = { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, cascades, rapids, parkings, allPoints: segments.flatMap(s => s.geometry.map(p => [p.lat, p.lon])) };
     currentRiverMode = 'access';
     renderRiverView();
 
@@ -1667,7 +1707,7 @@ async function showFullRiver(name, lat, lon) {
 
     showToast(
       `✅ <b>${name}</b> chargée.<br>` +
-      `🌀 ${confluences.length} confluences · 💧 ${springs.length} sources · 🌉 ${bridges.length} ponts · 💦 ${cascades.length} cascades · 〰️ ${rapids.length} rapides · 🏞️ ${lakeOutletPoints.length} sorties`,
+      `🌀 ${confluences.length} confluences · 💧 ${springs.length} sources · 🌉 ${bridges.length} ponts · 💦 ${cascades.length} cascades · 🅿️ ${parkings.length} parkings · 〰️ ${rapids.length} rapides`,
       7000
     );
   } catch (e) {
@@ -1688,7 +1728,7 @@ window.setRiverMode = setRiverMode;
 
 function renderRiverView() {
   if (!currentRiverData) return;
-  const { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, cascades, rapids } = currentRiverData;
+  const { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, cascades, rapids, parkings } = currentRiverData;
   riverLayer.clearLayers();
 
   // ---- Coloration des tronçons selon le mode ----
@@ -1786,6 +1826,11 @@ function renderRiverView() {
     const detail = isOSM
       ? `${c.type}${c.name ? ' — ' + c.name : ''}${c.height ? '<br>Hauteur : ' + c.height : ''}`
       : `${c.type} — chute estimée <b>${c.drop} m</b> sur <b>${c.distance} m</b> (pente <b>${c.slope}%</b>)`;
+    const parkInfo = c.nearestParking
+      ? `<div style="background:#fff59d;color:#0f1720;padding:4px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-top:6px">
+           🅿️ Parking à <b>${Math.round(c.nearestParking.distance)} m</b>${c.nearestParking.name ? ' — ' + c.nearestParking.name : ''}
+         </div>`
+      : `<div style="font-size:11px;color:var(--muted);margin-top:6px">🅿️ Pas de parking OSM dans un rayon de 500 m</div>`;
     L.marker([c.lat, c.lon], { icon: dotIcon('💦', '#e91e63') })
       .bindPopup(`
         <b>💦 ${c.type}</b> <span style="background:#e91e63;color:white;padding:1px 6px;border-radius:3px;font-size:10px">SPOT</span><br>
@@ -1795,8 +1840,27 @@ function renderRiverView() {
           eau ultra-oxygénée + dérive concentrée + couvert blanc.<br>
           Pose en limite de courant calme / écume.
         </span>
+        ${parkInfo}
         ${isOSM ? '' : '<div style="font-size:10px;color:var(--muted);margin-top:4px">⚙️ Détecté par profil d&rsquo;altitude — à confirmer sur place.</div>'}
         ${gmapsLink(c.lat, c.lon)}
+      `)
+      .addTo(riverLayer);
+  });
+
+  // Markers parking (uniquement ceux liés à une cascade, donc utiles)
+  (parkings || []).forEach(p => {
+    const tags = [];
+    if (p.capacity) tags.push(`Capacité : ${p.capacity}`);
+    if (p.surface) tags.push(`Surface : ${p.surface}`);
+    if (p.fee === 'yes') tags.push('💰 Payant');
+    else if (p.fee === 'no') tags.push('Gratuit');
+    if (p.access && p.access !== 'yes') tags.push('Accès : ' + p.access);
+    L.marker([p.lat, p.lon], { icon: dotIcon('🅿️', '#fbc02d') })
+      .bindPopup(`
+        <b>🅿️ Parking</b>${p.name ? '<br>' + p.name : ''}<br>
+        ${tags.length ? '<span style="font-size:11px;color:var(--muted)">' + tags.join('<br>') + '</span>' : ''}
+        <div style="font-size:11px;color:var(--muted);margin-top:6px">Point de départ vers une cascade située à proximité.</div>
+        ${gmapsLink(p.lat, p.lon, '🧭 Itinéraire Google Maps')}
       `)
       .addTo(riverLayer);
   });
