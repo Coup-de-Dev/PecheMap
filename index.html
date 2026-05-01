@@ -1397,25 +1397,26 @@ function detectConfluences(namedSegs, allWaterways) {
 }
 
 // Score expert truite par tronçon (combinaison de facteurs écologiques)
-function expertTroutScore({ sinuosity, distConfluence, distSpring, distBridge, distLakeOutlet }) {
+function expertTroutScore({ sinuosity, distConfluence, distSpring, distBridge, distLakeOutlet, distCascade, distRapid }) {
   let score = 0;
-  // Sinuosité = pool-riffle structure
   if (sinuosity >= 1.6) score += 3;
   else if (sinuosity >= 1.25) score += 2;
   else if (sinuosity >= 1.1) score += 1;
-  // Confluence à proximité = lieu de chasse privilégié
   if (distConfluence < 100) score += 3;
   else if (distConfluence < 300) score += 2;
   else if (distConfluence < 600) score += 1;
-  // Source froide à proximité = refuge thermique critique en été méditerranéen
   if (distSpring < 200) score += 3;
   else if (distSpring < 600) score += 1;
-  // Pont = fosse de pile, couvert
   if (distBridge < 100) score += 1;
-  // Sortie de plan d'eau = oxygéné, riche en proies
   if (distLakeOutlet < 300) score += 2;
+  // Cascade (vraie chute, fosse de plunge en aval) — must-fish
+  if (distCascade < 80) score += 4;       // pile dans la fosse après l'écume
+  else if (distCascade < 200) score += 2;
+  else if (distCascade < 500) score += 1;
+  // Rapide (radier rocheux étendu) — pénalité légère : hameçon coincé, technique
+  if (distRapid < 50) score -= 1;
 
-  if (score >= 7) return { color: '#00e676', label: 'Spot premium' };
+  if (score >= 8) return { color: '#00e676', label: 'Spot premium' };
   if (score >= 5) return { color: '#76ff03', label: 'Très favorable' };
   if (score >= 3) return { color: '#ffeb3b', label: 'Favorable' };
   if (score >= 1) return { color: '#ffb300', label: 'Correct' };
@@ -1483,6 +1484,9 @@ async function showFullRiver(name, lat, lon) {
         way["man_made"="bridge"](${bbox});
         way["bridge"="yes"](${bbox});
         way["natural"="water"](${bbox});
+        node["waterway"="waterfall"](${bbox});
+        way["waterway"~"^(waterfall|rapids)$"](${bbox});
+        way["man_made"~"^(weir|dam)$"](${bbox});
       );
       out geom tags;
     `;
@@ -1533,7 +1537,101 @@ async function showFullRiver(name, lat, lon) {
       });
     });
 
-    currentRiverData = { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, allPoints: segments.flatMap(s => s.geometry.map(p => [p.lat, p.lon])) };
+    // ---- Cascades / rapides tagués dans OSM ----
+    // On sépare les VRAIES cascades (chute verticale, fosse aval = spot ⭐)
+    // des RAPIDES (radier rocheux étendu, hameçon coincé = chiant à pêcher)
+    const cascadesOSM = [];
+    const rapidsOSM = [];
+    elems.forEach(e => {
+      const isFall = e.tags?.waterway === 'waterfall' || e.tags?.man_made === 'weir' || e.tags?.man_made === 'dam';
+      const isRapid = e.tags?.waterway === 'rapids';
+      if (!isFall && !isRapid) return;
+      let lat, lon;
+      if (e.type === 'node') { lat = e.lat; lon = e.lon; }
+      else if (e.geometry?.length) {
+        const mid = e.geometry[Math.floor(e.geometry.length / 2)];
+        lat = mid.lat; lon = mid.lon;
+      } else return;
+      if (isFall) {
+        const type = e.tags.waterway === 'waterfall' ? 'Cascade'
+                   : e.tags.man_made === 'weir' ? 'Seuil / barrage bas'
+                   : 'Barrage';
+        cascadesOSM.push({ lat, lon, name: e.tags.name, type, source: 'osm', height: e.tags['height'] || e.tags['ele'] });
+      } else {
+        rapidsOSM.push({ lat, lon, name: e.tags.name, type: 'Rapides', source: 'osm' });
+      }
+    });
+
+    // ---- Détection algorithmique : profil d'altitude le long de la rivière ----
+    showToast(`📐 Profil d'altitude (détection cascades)…`, 0);
+    const allSamples = [];
+    const sampleMeta = [];
+    segments.forEach((seg, sIdx) => {
+      const coords = seg.geometry.map(p => [p.lat, p.lon]);
+      let cumDist = 0, lastDist = 0;
+      allSamples.push(coords[0]); sampleMeta.push({ segIdx: sIdx, dist: 0 });
+      for (let i = 1; i < coords.length; i++) {
+        cumDist += distanceMeters(coords[i-1], coords[i]);
+        if (cumDist - lastDist > 120) {
+          allSamples.push(coords[i]);
+          sampleMeta.push({ segIdx: sIdx, dist: cumDist });
+          lastDist = cumDist;
+        }
+      }
+    });
+
+    // Plafond pour rester dans les quotas Open-Elevation
+    const MAX_SAMPLES = 250;
+    let samples = allSamples, meta = sampleMeta;
+    if (allSamples.length > MAX_SAMPLES) {
+      const step = allSamples.length / MAX_SAMPLES;
+      samples = []; meta = [];
+      for (let i = 0; i < MAX_SAMPLES; i++) {
+        const k = Math.floor(i * step);
+        samples.push(allSamples[k]); meta.push(sampleMeta[k]);
+      }
+    }
+    const elevs = await fetchElevations(samples);
+
+    // Détection algorithmique avec seuils stricts pour DISTINGUER :
+    //   - Cascade : pente forte (≥8%) sur courte distance (chute concentrée
+    //     → fosse de plunge en aval) — bonus de score important
+    //   - Rapide : pente modérée (4-8%) sur distance moyenne, ou chute
+    //     diluée — radier rocheux, NEUTRE (voire pénalité)
+    const cascadesAlgo = [];
+    const rapidsAlgo = [];
+    for (let i = 1; i < samples.length; i++) {
+      if (meta[i].segIdx !== meta[i-1].segIdx) continue;
+      const e1 = elevs[i-1], e2 = elevs[i];
+      if (e1 == null || e2 == null) continue;
+      const drop = Math.abs(e1 - e2);
+      const dist = distanceMeters(samples[i-1], samples[i]);
+      if (dist < 15 || drop < 1) continue;
+      const slope = drop / dist * 100;
+      const downstream = e1 > e2 ? samples[i] : samples[i-1];
+      const target = (cascade) => cascade ? cascadesOSM.concat(cascadesAlgo) : rapidsOSM.concat(rapidsAlgo);
+
+      if (slope >= 8 && drop >= 1.5) {
+        if (target(true).some(c => distanceMeters([c.lat, c.lon], downstream) < 80)) continue;
+        cascadesAlgo.push({
+          lat: downstream[0], lon: downstream[1],
+          drop: drop.toFixed(1), distance: Math.round(dist), slope: slope.toFixed(1),
+          type: slope >= 15 ? 'Cascade marquée' : 'Cascade probable',
+          source: 'algo'
+        });
+      } else if (slope >= 4 && drop >= 1.5) {
+        if (target(false).some(c => distanceMeters([c.lat, c.lon], downstream) < 100)) continue;
+        rapidsAlgo.push({
+          lat: downstream[0], lon: downstream[1],
+          drop: drop.toFixed(1), distance: Math.round(dist), slope: slope.toFixed(1),
+          type: 'Rapide / radier', source: 'algo'
+        });
+      }
+    }
+    const cascades = [...cascadesOSM, ...cascadesAlgo];
+    const rapids   = [...rapidsOSM,   ...rapidsAlgo];
+
+    currentRiverData = { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, cascades, rapids, allPoints: segments.flatMap(s => s.geometry.map(p => [p.lat, p.lon])) };
     currentRiverMode = 'access';
     renderRiverView();
 
@@ -1543,8 +1641,8 @@ async function showFullRiver(name, lat, lon) {
 
     showToast(
       `✅ <b>${name}</b> chargée.<br>` +
-      `🌀 ${confluences.length} confluences · 💧 ${springs.length} sources · 🌉 ${bridges.length} ponts · 🏞️ ${lakeOutletPoints.length} sorties de plan d'eau`,
-      6000
+      `🌀 ${confluences.length} confluences · 💧 ${springs.length} sources · 🌉 ${bridges.length} ponts · 💦 ${cascades.length} cascades · 〰️ ${rapids.length} rapides · 🏞️ ${lakeOutletPoints.length} sorties`,
+      7000
     );
   } catch (e) {
     console.error(e);
@@ -1564,7 +1662,7 @@ window.setRiverMode = setRiverMode;
 
 function renderRiverView() {
   if (!currentRiverData) return;
-  const { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints } = currentRiverData;
+  const { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, cascades, rapids } = currentRiverData;
   riverLayer.clearLayers();
 
   // ---- Coloration des tronçons selon le mode ----
@@ -1592,9 +1690,12 @@ function renderRiverView() {
         const distSpr = nearestPointDist(mid, springs);
         const distBr  = nearestPointDist(mid, bridges);
         const distOut = nearestPointDist(mid, lakeOutletPoints);
+        const distCas = nearestPointDist(mid, cascades || []);
+        const distRap = nearestPointDist(mid, rapids || []);
         const sc = expertTroutScore({
           sinuosity: sin, distConfluence: distConf, distSpring: distSpr,
-          distBridge: distBr, distLakeOutlet: distOut
+          distBridge: distBr, distLakeOutlet: distOut,
+          distCascade: distCas, distRapid: distRap
         });
         color = sc.color; label = sc.label;
         popupExtra = `
@@ -1602,7 +1703,9 @@ function renderRiverView() {
             Sinuosité : <b>${sin.toFixed(2)}</b><br>
             Confluence : <b>${distConf < 99999 ? Math.round(distConf)+' m' : '—'}</b><br>
             Source : <b>${distSpr < 99999 ? Math.round(distSpr)+' m' : '—'}</b><br>
-            Pont : <b>${distBr < 99999 ? Math.round(distBr)+' m' : '—'}</b>
+            Pont : <b>${distBr < 99999 ? Math.round(distBr)+' m' : '—'}</b><br>
+            Cascade : <b style="color:#e91e63">${distCas < 99999 ? Math.round(distCas)+' m' : '—'}</b><br>
+            Rapide : <b style="color:#9e9e9e">${distRap < 99999 ? Math.round(distRap)+' m' : '—'}</b>
           </span>
         `;
       }
@@ -1648,6 +1751,45 @@ function renderRiverView() {
   lakeOutletPoints.forEach(o => {
     L.marker([o.lat, o.lon], { icon: dotIcon('🏞️', '#388e3c') })
       .bindPopup(`<b>🏞️ Sortie de plan d'eau</b>${o.lakeName ? '<br>' + o.lakeName : ''}<br><span style="font-size:11px;color:var(--muted)">Eau oxygénée, brassée, riche en proies</span>`)
+      .addTo(riverLayer);
+  });
+
+  // Cascades = chute verticale + fosse de plunge en aval = SPOT ⭐
+  (cascades || []).forEach(c => {
+    const isOSM = c.source === 'osm';
+    const detail = isOSM
+      ? `${c.type}${c.name ? ' — ' + c.name : ''}${c.height ? '<br>Hauteur : ' + c.height : ''}`
+      : `${c.type} — chute estimée <b>${c.drop} m</b> sur <b>${c.distance} m</b> (pente <b>${c.slope}%</b>)`;
+    L.marker([c.lat, c.lon], { icon: dotIcon('💦', '#e91e63') })
+      .bindPopup(`
+        <b>💦 ${c.type}</b> <span style="background:#e91e63;color:white;padding:1px 6px;border-radius:3px;font-size:10px">SPOT</span><br>
+        ${detail}<br>
+        <span style="font-size:11px;color:var(--muted)">
+          La fosse juste en aval (après l'écume) est un must-fish :<br>
+          eau ultra-oxygénée + dérive concentrée + couvert blanc.<br>
+          Pose en limite de courant calme / écume.
+        </span>
+        ${isOSM ? '' : '<div style="font-size:10px;color:var(--muted);margin-top:4px">⚙️ Détecté par profil d&rsquo;altitude — à confirmer sur place.</div>'}
+      `)
+      .addTo(riverLayer);
+  });
+
+  // Rapides = radier rocheux étendu = chiant à pêcher (hameçon coincé), pas de bonus
+  (rapids || []).forEach(r => {
+    const isOSM = r.source === 'osm';
+    const detail = isOSM
+      ? `${r.type}${r.name ? ' — ' + r.name : ''}`
+      : `Pente soutenue <b>${r.slope}%</b> (chute <b>${r.drop} m</b> sur <b>${r.distance} m</b>)`;
+    L.marker([r.lat, r.lon], { icon: dotIcon('〰️', '#757575') })
+      .bindPopup(`
+        <b>〰️ ${r.type}</b> <span style="background:#757575;color:white;padding:1px 6px;border-radius:3px;font-size:10px">À ÉVITER</span><br>
+        ${detail}<br>
+        <span style="font-size:11px;color:var(--muted)">
+          Radier rocheux : courant rapide sans vraie fosse en aval.<br>
+          Pêche technique, hameçon facilement coincé dans les rochers.<br>
+          Préférer les pocket waters (fly nymphe) ou contourner.
+        </span>
+      `)
       .addTo(riverLayer);
   });
 
