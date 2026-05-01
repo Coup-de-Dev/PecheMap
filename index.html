@@ -284,6 +284,39 @@
     align-items: center;
     gap: 6px;
   }
+  #river-toolbar {
+    position: absolute;
+    left: 50%;
+    top: 14px;
+    transform: translateX(-50%);
+    z-index: 1000;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    padding: 4px;
+    display: none;
+    gap: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .river-mode-btn {
+    background: transparent;
+    color: var(--text);
+    border: none;
+    padding: 8px 14px;
+    border-radius: 18px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .river-mode-btn.active {
+    background: var(--accent);
+    color: #0f1720;
+  }
+  @media (max-width: 600px) {
+    #river-toolbar { left: 70px; transform: none; }
+    .river-mode-btn { padding: 6px 10px; font-size: 11px; }
+  }
   .toast {
     position: absolute;
     bottom: 30px;
@@ -388,6 +421,10 @@
   <button class="fab-habitat" id="fab-habitat" title="Afficher les cours d'eau colorés par potentiel truite">🗺️ Potentiel truite</button>
   <button class="fab-locate" id="fab-locate" title="Me géolocaliser">📍</button>
   <button class="fab-back-river" id="fab-back-river" onclick="clearFullRiver()" title="Fermer la vue rivière">← Retour</button>
+  <div id="river-toolbar">
+    <button class="river-mode-btn active" data-mode="access" onclick="setRiverMode('access')" title="Coloration par accès véhicule">🚗 Accès</button>
+    <button class="river-mode-btn" data-mode="trout" onclick="setRiverMode('trout')" title="Coloration par potentiel truite (expert)">🎣 Truite</button>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -1310,11 +1347,98 @@ function accessibilityColor(distM) {
   return { color: '#e53935', label: 'Sauvage / éloigné' };
 }
 
+// ---------------------------------------------------------------------------
+// Helpers expert truite
+// ---------------------------------------------------------------------------
+
+// Sinuosité (ratio longueur réelle / longueur en ligne droite) sur une fenêtre
+function sinuosityWindow(coords, idx, windowSize = 8) {
+  const start = Math.max(0, idx - windowSize/2);
+  const end = Math.min(coords.length - 1, idx + windowSize/2);
+  if (end - start < 2) return 1;
+  let arc = 0;
+  for (let i = start + 1; i <= end; i++) arc += distanceMeters(coords[i-1], coords[i]);
+  const chord = distanceMeters(coords[start], coords[end]);
+  return chord > 0 ? arc / chord : 1;
+}
+
+// Détection des confluences : points où la rivière nommée touche
+// un autre cours d'eau (différent ou sans nom). Tolérance ~25 m.
+function detectConfluences(namedSegs, allWaterways) {
+  const out = [];
+  const namedNames = new Set(namedSegs.map(s => s.tags?.name).filter(Boolean));
+  const namedPoints = [];
+  namedSegs.forEach(s => s.geometry.forEach(p => namedPoints.push([p.lat, p.lon])));
+
+  for (const w of allWaterways) {
+    if (w.tags?.name && namedNames.has(w.tags.name)) continue;
+    if (!w.geometry || w.geometry.length < 2) continue;
+    const endpoints = [w.geometry[0], w.geometry[w.geometry.length - 1]];
+    for (const ep of endpoints) {
+      let hit = null;
+      for (const np of namedPoints) {
+        if (distanceMeters([ep.lat, ep.lon], np) < 25) { hit = np; break; }
+      }
+      if (hit) {
+        out.push({
+          lat: ep.lat, lon: ep.lon,
+          otherName: w.tags?.name || 'Affluent sans nom',
+          waterway: w.tags?.waterway
+        });
+      }
+    }
+  }
+  // Déduplication (50 m)
+  const dedup = [];
+  for (const c of out) {
+    if (!dedup.some(d => distanceMeters([d.lat, d.lon], [c.lat, c.lon]) < 50)) dedup.push(c);
+  }
+  return dedup;
+}
+
+// Score expert truite par tronçon (combinaison de facteurs écologiques)
+function expertTroutScore({ sinuosity, distConfluence, distSpring, distBridge, distLakeOutlet }) {
+  let score = 0;
+  // Sinuosité = pool-riffle structure
+  if (sinuosity >= 1.6) score += 3;
+  else if (sinuosity >= 1.25) score += 2;
+  else if (sinuosity >= 1.1) score += 1;
+  // Confluence à proximité = lieu de chasse privilégié
+  if (distConfluence < 100) score += 3;
+  else if (distConfluence < 300) score += 2;
+  else if (distConfluence < 600) score += 1;
+  // Source froide à proximité = refuge thermique critique en été méditerranéen
+  if (distSpring < 200) score += 3;
+  else if (distSpring < 600) score += 1;
+  // Pont = fosse de pile, couvert
+  if (distBridge < 100) score += 1;
+  // Sortie de plan d'eau = oxygéné, riche en proies
+  if (distLakeOutlet < 300) score += 2;
+
+  if (score >= 7) return { color: '#00e676', label: 'Spot premium' };
+  if (score >= 5) return { color: '#76ff03', label: 'Très favorable' };
+  if (score >= 3) return { color: '#ffeb3b', label: 'Favorable' };
+  if (score >= 1) return { color: '#ffb300', label: 'Correct' };
+  return { color: '#90a4ae', label: 'Section banale' };
+}
+
+function nearestPointDist(point, list) {
+  let min = Infinity;
+  for (const p of list) {
+    const d = distanceMeters(point, [p.lat, p.lon]);
+    if (d < min) min = d;
+  }
+  return min;
+}
+
+// État courant de la vue rivière (pour pouvoir basculer entre modes sans refetch)
+let currentRiverData = null;
+let currentRiverMode = 'access';
+
 async function showFullRiver(name, lat, lon) {
   showToast(`📡 Chargement de "${name}"…`, 0);
 
   try {
-    // 1) Tous les segments OSM portant ce nom dans un rayon de 50 km
     const escName = name.replace(/"/g, '\\"');
     const segQuery = `
       [out:json][timeout:30];
@@ -1331,12 +1455,11 @@ async function showFullRiver(name, lat, lon) {
       return;
     }
 
-    // ⬇️  ISOLEMENT VISUEL : on cache tout sauf la rivière en cours
-    // (habitat + lacs + autres rivières + marqueurs de spots)
+    // Isolement visuel
     if (habitatVisible) map.removeLayer(habitatLayer);
     Object.values(markers).forEach(m => map.removeLayer(m));
 
-    // 2) Bbox englobante de tous les segments
+    // Bbox englobante
     let minLat=Infinity, maxLat=-Infinity, minLon=Infinity, maxLon=-Infinity;
     segments.forEach(s => s.geometry.forEach(p => {
       if (p.lat < minLat) minLat = p.lat;
@@ -1344,77 +1467,85 @@ async function showFullRiver(name, lat, lon) {
       if (p.lon < minLon) minLon = p.lon;
       if (p.lon > maxLon) maxLon = p.lon;
     }));
-    // Petit padding pour capter les routes à proximité immédiate
-    const pad = 0.005;
+    const pad = 0.008;
     const bbox = `${minLat-pad},${minLon-pad},${maxLat+pad},${maxLon+pad}`;
 
-    showToast(`🛣️ Récupération des routes du secteur…`, 0);
+    showToast(`🛣️ Routes, sources, ponts, autres cours d'eau…`, 0);
 
-    // 3) Toutes les routes carrossables dans le bbox (on exclut les sentiers
-    //    pour mesurer la *vraie* accessibilité véhicule)
-    const roadQuery = `
-      [out:json][timeout:30];
-      way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track|living_street)$"](${bbox});
-      out geom;
+    // Une seule grosse requête Overpass : on tire tout ce dont on a besoin
+    const ctxQuery = `
+      [out:json][timeout:60];
+      (
+        way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track|living_street)$"](${bbox});
+        node["natural"="spring"](${bbox});
+        way["natural"="spring"](${bbox});
+        way["waterway"~"^(stream|river)$"](${bbox});
+        way["man_made"="bridge"](${bbox});
+        way["bridge"="yes"](${bbox});
+        way["natural"="water"](${bbox});
+      );
+      out geom tags;
     `;
-    const roadData = await fetchOverpass(roadQuery);
+    const ctxData = await fetchOverpass(ctxQuery);
+    const elems = ctxData.elements || [];
+
     const roadPoints = [];
-    (roadData.elements || []).forEach(r => {
-      if (!r.geometry) return;
-      // Échantillonnage : on prend 1 point sur 2 pour limiter le coût
+    elems.filter(e => e.tags?.highway && e.geometry).forEach(r => {
       for (let i = 0; i < r.geometry.length; i += 2) {
         roadPoints.push([r.geometry[i].lat, r.geometry[i].lon]);
       }
     });
 
-    if (roadPoints.length === 0) {
-      showToast("Aucune route trouvée dans le secteur — coloration impossible.", 4000);
-      return;
-    }
+    const springs = elems.filter(e => e.tags?.natural === 'spring').map(e => {
+      if (e.type === 'node') return { lat: e.lat, lon: e.lon, name: e.tags?.name };
+      const p = e.geometry?.[0];
+      return p ? { lat: p.lat, lon: p.lon, name: e.tags?.name } : null;
+    }).filter(Boolean);
 
-    showToast(`📏 Calcul d'accessibilité (${roadPoints.length} pts route)…`, 0);
+    const bridges = elems
+      .filter(e => (e.tags?.bridge === 'yes' || e.tags?.man_made === 'bridge') && e.geometry)
+      .map(e => {
+        const mid = e.geometry[Math.floor(e.geometry.length / 2)];
+        return { lat: mid.lat, lon: mid.lon, name: e.tags?.name };
+      });
 
-    // 4) Pour chaque tronçon de la rivière, on calcule la distance
-    //    minimale à une route et on colore en conséquence
-    riverLayer.clearLayers();
-    const stats = { 'Bord de route': 0, 'Marche courte': 0, 'Sentier / 10-15 min': 0, 'Sauvage / éloigné': 0 };
-    let totalKm = 0;
+    const allWaterways = elems.filter(e => e.tags?.waterway && e.geometry);
+    const lakes = elems.filter(e => e.tags?.natural === 'water' && e.geometry);
 
-    segments.forEach(seg => {
-      const coords = seg.geometry.map(p => [p.lat, p.lon]);
-      for (let i = 0; i < coords.length - 1; i++) {
-        const a = coords[i], b = coords[i+1];
-        const mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
-        const distRoad = nearestRoadDistance(mid, roadPoints);
-        const acc = accessibilityColor(distRoad);
-        stats[acc.label] = (stats[acc.label] || 0) + 1;
-        const segLen = distanceKm(a, b);
-        totalKm += segLen;
+    // Confluences détectées
+    const confluences = detectConfluences(segments, allWaterways);
 
-        // Contour blanc + ligne colorée
-        L.polyline([a, b], { color: '#ffffff', weight: 7, opacity: 0.85 }).addTo(riverLayer);
-        const line = L.polyline([a, b], { color: acc.color, weight: 4, opacity: 1 });
-        line.bindPopup(`
-          <b>${name}</b><br>
-          <span style="background:${acc.color};color:#0f1720;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700">${acc.label}</span><br>
-          <span style="font-size:11px;color:var(--muted)">Distance route la plus proche : <b>${Math.round(distRoad)} m</b></span>
-        `);
-        line.addTo(riverLayer);
-      }
+    // Sortie de plan d'eau : pour chaque lac, on cherche les segments de notre rivière
+    // qui en sortent. Approximation : point d'un segment à <30m d'un sommet du polygone
+    // du lac, et qui n'a pas de continuation amont vers l'intérieur du lac.
+    const lakeOutletPoints = [];
+    lakes.forEach(lk => {
+      const lakePts = lk.geometry.map(p => [p.lat, p.lon]);
+      segments.forEach(seg => {
+        seg.geometry.forEach(rp => {
+          for (const lp of lakePts) {
+            if (distanceMeters([rp.lat, rp.lon], lp) < 30) {
+              lakeOutletPoints.push({ lat: rp.lat, lon: rp.lon, lakeName: lk.tags?.name });
+              break;
+            }
+          }
+        });
+      });
     });
 
-    riverLayer.addTo(map);
+    currentRiverData = { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints, allPoints: segments.flatMap(s => s.geometry.map(p => [p.lat, p.lon])) };
+    currentRiverMode = 'access';
+    renderRiverView();
 
-    // 5) Centrer la carte sur la rivière complète
-    const allPoints = segments.flatMap(s => s.geometry.map(p => [p.lat, p.lon]));
-    map.fitBounds(L.latLngBounds(allPoints), { padding: [40, 40] });
+    map.fitBounds(L.latLngBounds(currentRiverData.allPoints), { padding: [50, 50] });
+    document.getElementById('fab-back-river').style.display = 'flex';
+    document.getElementById('river-toolbar').style.display = 'flex';
 
-    // 6) Bouton retour
-    const backBtn = document.getElementById('fab-back-river');
-    backBtn.style.display = 'flex';
-
-    const summary = `🟢 ${stats['Bord de route']} bord route · 🟡 ${stats['Marche courte']} marche · 🟠 ${stats['Sentier / 10-15 min']} sentier · 🔴 ${stats['Sauvage / éloigné']} sauvage`;
-    showToast(`✅ <b>${name}</b> — ${totalKm.toFixed(1)} km cartographiés.<br>${summary}`, 8000);
+    showToast(
+      `✅ <b>${name}</b> chargée.<br>` +
+      `🌀 ${confluences.length} confluences · 💧 ${springs.length} sources · 🌉 ${bridges.length} ponts · 🏞️ ${lakeOutletPoints.length} sorties de plan d'eau`,
+      6000
+    );
   } catch (e) {
     console.error(e);
     showToast("❌ Erreur : " + e.message, 5000);
@@ -1422,11 +1553,116 @@ async function showFullRiver(name, lat, lon) {
 }
 window.showFullRiver = showFullRiver;
 
+function setRiverMode(mode) {
+  currentRiverMode = mode;
+  document.querySelectorAll('.river-mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  renderRiverView();
+}
+window.setRiverMode = setRiverMode;
+
+function renderRiverView() {
+  if (!currentRiverData) return;
+  const { name, segments, roadPoints, springs, bridges, confluences, lakeOutletPoints } = currentRiverData;
+  riverLayer.clearLayers();
+
+  // ---- Coloration des tronçons selon le mode ----
+  const stats = {};
+  let totalKm = 0;
+
+  segments.forEach(seg => {
+    const coords = seg.geometry.map(p => [p.lat, p.lon]);
+    for (let i = 0; i < coords.length - 1; i++) {
+      const a = coords[i], b = coords[i+1];
+      const mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
+      const segKm = distanceKm(a, b);
+      totalKm += segKm;
+
+      let color, label, popupExtra = '';
+      if (currentRiverMode === 'access') {
+        const distRoad = nearestRoadDistance(mid, roadPoints);
+        const acc = accessibilityColor(distRoad);
+        color = acc.color; label = acc.label;
+        popupExtra = `<span style="font-size:11px;color:var(--muted)">Distance route : <b>${Math.round(distRoad)} m</b></span>`;
+      } else {
+        // Mode truite expert
+        const sin = sinuosityWindow(coords, i, 8);
+        const distConf = nearestPointDist(mid, confluences);
+        const distSpr = nearestPointDist(mid, springs);
+        const distBr  = nearestPointDist(mid, bridges);
+        const distOut = nearestPointDist(mid, lakeOutletPoints);
+        const sc = expertTroutScore({
+          sinuosity: sin, distConfluence: distConf, distSpring: distSpr,
+          distBridge: distBr, distLakeOutlet: distOut
+        });
+        color = sc.color; label = sc.label;
+        popupExtra = `
+          <span style="font-size:11px;color:var(--muted)">
+            Sinuosité : <b>${sin.toFixed(2)}</b><br>
+            Confluence : <b>${distConf < 99999 ? Math.round(distConf)+' m' : '—'}</b><br>
+            Source : <b>${distSpr < 99999 ? Math.round(distSpr)+' m' : '—'}</b><br>
+            Pont : <b>${distBr < 99999 ? Math.round(distBr)+' m' : '—'}</b>
+          </span>
+        `;
+      }
+      stats[label] = (stats[label] || 0) + 1;
+
+      L.polyline([a, b], { color: '#ffffff', weight: 7, opacity: 0.85 }).addTo(riverLayer);
+      const line = L.polyline([a, b], { color, weight: 4, opacity: 1 });
+      line.bindPopup(`
+        <b>${name}</b><br>
+        <span style="background:${color};color:#0f1720;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700">${label}</span><br>
+        ${popupExtra}
+      `);
+      line.addTo(riverLayer);
+    }
+  });
+
+  // ---- Markers spéciaux (toujours visibles dans les deux modes) ----
+  const dotIcon = (emoji, color) => L.divIcon({
+    className: '',
+    html: `<div style="width:26px;height:26px;border-radius:50%;background:${color};border:2px solid white;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 2px 4px rgba(0,0,0,0.4)">${emoji}</div>`,
+    iconSize: [26, 26],
+    iconAnchor: [13, 13]
+  });
+
+  confluences.forEach(c => {
+    L.marker([c.lat, c.lon], { icon: dotIcon('🌀', '#1976d2') })
+      .bindPopup(`<b>🌀 Confluence</b><br>Avec : ${c.otherName}<br><span style="font-size:11px;color:var(--muted)">Lieu de chasse privilégié — eau plus fraîche du tributaire + accumulation de la dérive</span>`)
+      .addTo(riverLayer);
+  });
+
+  springs.forEach(s => {
+    L.marker([s.lat, s.lon], { icon: dotIcon('💧', '#00bcd4') })
+      .bindPopup(`<b>💧 Source</b>${s.name ? '<br>' + s.name : ''}<br><span style="font-size:11px;color:var(--muted)">Refuge thermique critique en été (eau ~12-14°C constante en pays karstique)</span>`)
+      .addTo(riverLayer);
+  });
+
+  bridges.forEach(b => {
+    L.marker([b.lat, b.lon], { icon: dotIcon('🌉', '#7b1fa2') })
+      .bindPopup(`<b>🌉 Pont</b>${b.name ? '<br>' + b.name : ''}<br><span style="font-size:11px;color:var(--muted)">Fosse de pile, couvert, accès facile</span>`)
+      .addTo(riverLayer);
+  });
+
+  lakeOutletPoints.forEach(o => {
+    L.marker([o.lat, o.lon], { icon: dotIcon('🏞️', '#388e3c') })
+      .bindPopup(`<b>🏞️ Sortie de plan d'eau</b>${o.lakeName ? '<br>' + o.lakeName : ''}<br><span style="font-size:11px;color:var(--muted)">Eau oxygénée, brassée, riche en proies</span>`)
+      .addTo(riverLayer);
+  });
+
+  riverLayer.addTo(map);
+
+  const summary = Object.entries(stats).map(([k,v]) => `${k}: ${v}`).join(' · ');
+  const modeLabel = currentRiverMode === 'access' ? '🚗 Accès véhicule' : '🎣 Truite (expert)';
+  console.log(`[PecheMap] ${name} — ${modeLabel} — ${totalKm.toFixed(1)} km — ${summary}`);
+}
+
 function clearFullRiver() {
   riverLayer.clearLayers();
   map.removeLayer(riverLayer);
+  currentRiverData = null;
 
-  // ⬇️  RESTAURATION : on remet l'état précédent (habitat + spots filtrés)
   if (habitatVisible) habitatLayer.addTo(map);
   Object.entries(markers).forEach(([i, m]) => {
     const idx = parseInt(i);
@@ -1435,6 +1671,7 @@ function clearFullRiver() {
   });
 
   document.getElementById('fab-back-river').style.display = 'none';
+  document.getElementById('river-toolbar').style.display = 'none';
   showToast("Vue rivière complète fermée.", 2000);
 }
 window.clearFullRiver = clearFullRiver;
